@@ -235,6 +235,55 @@ _ENCLOSED_ACCOUNT = re.compile(
     r".{0,60}\baccounts?\b.{0,40}\b(?:attach\w*|enclos\w*|letter|note)\b",
     re.IGNORECASE | re.DOTALL,
 )
+# Account details sitting in an attachment, with no routing verb required.
+_ENCLOSED_DETAILS = re.compile(
+    r"\b(?:account|banking|payment|remittance)\s+details\b.{0,60}"
+    r"\b(?:enclos\w+|attach\w*|letter|notice)\b"
+    r"|\b(?:enclos\w+|attach\w*|letter|notice)\b.{0,60}"
+    r"\b(?:account|banking|payment|remittance)\s+details\b",
+    re.IGNORECASE | re.DOTALL,
+)
+# A factor or factoring partner taking over payment. "two-factor" and "key factor" do not match.
+_FACTORING_SHIFT = re.compile(
+    r"\bfactoring\b"
+    r"|(?<![\w-])factors?(?![\w-]).{0,48}\b(?:payments?|invoices?|settle|receivables)\b"
+    r"|\b(?:payments?|invoices?|settle|receivables)\b.{0,48}(?<![\w-])factors?(?![\w-])",
+    re.IGNORECASE | re.DOTALL,
+)
+# An enrollment or authorization form for ACH or direct deposit. "paid via ACH" is not one.
+_ACH_ENROLL = re.compile(
+    r"\bach\b.{0,60}\b(?:enrollment|enrolment|authori[sz]\w*|sign-?up|form)\b"
+    r"|\b(?:enroll\w*|enrol\w*|authori[sz]\w*|sign-?up)\b.{0,60}\b(?:ach|direct\s+deposit)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_LOCKBOX_CHANGE = re.compile(
+    r"\bnew\s+lock\s*box(?:es)?\b"
+    r"|\block\s*box(?:es)?\b.{0,40}\b(?:chang\w+|mov\w+|updat\w+|switch\w*|instead|replac\w+|no longer)\b"
+    r"|\b(?:chang\w+|mov\w+|updat\w+|switch\w*|instead|replac\w+)\b.{0,40}\block\s*box(?:es)?\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONSUMER_RAIL = r"(?:zelle|venmo|cash\s*app|cashapp)"
+_RAIL_ASK = re.compile(
+    rf"\b(?:send|pay|transfer|route|forward|direct|settle)\b.{{0,60}}\b{_CONSUMER_RAIL}\b"
+    rf"|\b{_CONSUMER_RAIL}\b.{{0,48}}(?:@\w+|\b(?:to|at|phone|number|handle|me)\b)"
+    rf"|\b(?:zelle|venmo)\s+me\b"
+    rf"|\b{_CONSUMER_RAIL}\b[^.\n]{{0,40}}(?:\+?\d[\d\s().-]{{6,}}\d)"
+    rf"|\bcash\s*app\b.{{0,24}}\$[A-Za-z][A-Za-z0-9_]{{1,20}}\b"
+    rf"|\$[A-Za-z][A-Za-z0-9_]{{1,20}}\b.{{0,30}}\bcash\s*app\b"
+    rf"|\b(?:paypal\.me|venmo\.com/u|cash\.app)/[A-Za-z0-9._-]{{2,}}",
+    re.IGNORECASE | re.DOTALL,
+)
+# A receipt or a service notification. Stripped before the rail ask is read.
+_RAIL_NOTICE = re.compile(
+    r"[^.!\n]*\b(?:"
+    r"receipts?|received|you(?:'ve| have)? paid|paid you|"
+    r"(?:payment|transfer|money) (?:was |has been |is )?sent|"
+    r"was sent|has been (?:sent|paid|deposited|received)|"
+    r"on its way|confirmations?|notifications?|refund(?:ed)?|"
+    r"you got paid|we(?:'ve| have) paid|has been paid"
+    r")\b[^.!\n]*",
+    re.IGNORECASE,
+)
 _IBAN_CANDIDATE = re.compile(
     r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b",
     re.IGNORECASE,
@@ -381,8 +430,8 @@ def _payment_change(text: str) -> bool:
         _BANK_FIELD.search(text or "") or re.search(r"\b(payment|paycheck|deposit|account)\b", text or "", re.I)
     ):
         return True
-    if re.search(r"\bsort code\s*:", text or "", re.I) and re.search(r"\baccount\s*:", text or "", re.I):
-        return True
+    # A vendor footer that only prints a sort code and an account number is a
+    # payment detail for the filing gate, not a claim the message is phishing.
     if re.search(r"\brouting\b", text or "", re.I) and re.search(r"\baccount\b", text or "", re.I):
         if re.search(r"\b(update|new|switch|deposit|paycheck|wire|transfer)\b", text or "", re.I):
             return True
@@ -566,21 +615,56 @@ def _bank_change(text: str) -> bool:
     return bool(_BANK_MOVE.search(cleaned) or _PAYMENTS_NOW.search(cleaned))
 
 
+def _consumer_rail_request(text: str) -> bool:
+    """Zelle, Venmo, Cash App, or a PayPal.me link used to ask for money.
+
+    A receipt or a notification from the service is removed first, so
+    "you received $40 on Venmo" is not a request.
+    """
+    cleaned = _RAIL_NOTICE.sub(" ", text or "")
+    return bool(_RAIL_ASK.search(cleaned))
+
+
+def _payment_destination_shift(text: str) -> bool:
+    """A change of who gets paid that is not a bank-account number.
+
+    Factoring, an ACH enrollment or authorization form, a lockbox move, and
+    account details left in an enclosed notice. A paid-via-ACH receipt is not
+    one of these.
+    """
+    cleaned = _without_reassurance(text or "")
+    return bool(
+        _FACTORING_SHIFT.search(cleaned)
+        or _ACH_ENROLL.search(cleaned)
+        or _LOCKBOX_CHANGE.search(cleaned)
+        or _ENCLOSED_DETAILS.search(cleaned)
+    )
+
+
 def payment_related(text: str) -> bool:
     """True when the text moves money or changes where an existing payment goes.
 
     A valid IBAN, a labeled BIC or SWIFT code, a US account with an ABA routing
     number, or a UK sort code with an account number matches. So does a bank
     or institution change, including the same shape in Spanish or French, and
-    a request to send a payment to the account in an attached letter. A new
-    client's AP address, with nothing being replaced, does not. A payout notice
-    that only names the bank account it is already going to does not. Asking
-    to also CC accounts payable does not, even when the note says the bank
-    details are unchanged. The words IBAN or SWIFT, with no real code, do not.
+    a request to send a payment to the account in an attached letter. Asking
+    a first contact, or a payment-change note, to pay by Zelle, Venmo, Cash
+    App, or PayPal.me matches. A receipt or notification from those services
+    does not. Factoring, an ACH enrollment form, a lockbox change, and account
+    details in an enclosed notice match. A new client's AP address, with
+    nothing being replaced, does not. A payout notice that only names the bank
+    account it is already going to does not. Asking to also CC accounts
+    payable does not, even when the note says the bank details are unchanged.
+    The words IBAN or SWIFT, with no real code, do not.
     """
     folded = fold(text or "")
     cleaned = _without_reassurance(_strip_additive_cc(folded))
-    if _account_shapes(folded) or _ENCLOSED_ACCOUNT.search(folded):
+    if (
+        _account_shapes(folded)
+        or _ENCLOSED_ACCOUNT.search(folded)
+        or _consumer_rail_request(folded)
+        or _payment_destination_shift(folded)
+    ):
         return True
     if _destination_change(folded) or _bank_change(folded):
         return True

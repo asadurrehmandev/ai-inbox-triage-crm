@@ -78,6 +78,20 @@ def test_invoice_destinations_are_phone_blocked_and_an_added_cc_is_not():
     assert payment_related("Notre banque a changé.") is True
     assert payment_related("The payout is on its way to your bank account ending 4242.") is False
     assert payment_related("Please also cc our AP. There is no change to the bank details.") is False
+    assert payment_related("Please Zelle the deposit to 415-555-0199.") is True
+    assert payment_related("Venmo @northwind for the retainer.") is True
+    assert payment_related("Cash App $lanehq when you have a moment.") is True
+    assert payment_related("Use https://paypal.me/fieldnote for the deposit.") is True
+    assert payment_related("You received $40.00 on Venmo from Alex.") is False
+    assert payment_related("Your Zelle payment was sent.") is False
+    assert payment_related("PayPal receipt. You paid Harbor Studio $20.") is False
+    assert payment_related("We've paid INV-2207 via ACH this morning.") is False
+    assert payment_related("Please settle the open invoices with our factor.") is True
+    assert payment_related("Complete the ACH authorization form before Friday.") is True
+    assert payment_related("Our lockbox changed last week.") is True
+    assert payment_related("The account details are in the enclosed notice.") is True
+    assert payment_related("Two-factor authentication is required for the portal.") is False
+    assert payment_related("The key factor is the timeline, not the price.") is False
 
 
 def test_unauthenticated_same_domain_link_needs_confirm_and_aligned_dkim_does_not(client, monkeypatch):

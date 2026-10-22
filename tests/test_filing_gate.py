@@ -3,8 +3,8 @@
 import json
 
 from app import crm, db
-from app.classifier import Classification
-from app.risk import payment_related
+from app.classifier import Classification, classify_rules
+from app.risk import hard_flags, payment_related
 
 
 def _crm_ids(client) -> set[str]:
@@ -151,6 +151,68 @@ def test_crm_write_and_relabel_cannot_skip_the_gate(client):
     )
     assert missing.status_code == 404
     assert "gate-no-such-message" not in _crm_ids(client)
+
+    phish = {
+        "id": "gate-unclassified-phish",
+        "from_name": "Mailbox",
+        "from_email": "desk@mail-quota.example",
+        "subject": "mailbox notice",
+        "body": (
+            "Your mailbox needs a check.\n\n"
+            "Verify your account to keep receiving mail:\n"
+            "https://mail-quota.example/login\n"
+        ),
+        "received_at": "2026-10-22T12:00:00+00:00",
+    }
+    db.insert_email(phish)
+    assert db.get_triage_by_email(phish["id"]) is None
+    labeled = client.post(
+        "/api/triage",
+        json={
+            "email_id": phish["id"],
+            "category": "lead",
+            "confidence": 0.9,
+            "intent": "request a proposal",
+            "draft_reply": "Thanks for writing.",
+        },
+    )
+    assert labeled.status_code == 409
+    assert labeled.json()["detail"]["code"] == "security"
+    assert db.get_triage_by_email(phish["id"]) is None
+    support = client.post(
+        "/api/triage",
+        json={
+            "email_id": phish["id"],
+            "category": "support",
+            "confidence": 0.4,
+            "intent": "review a suspicious message",
+            "draft_reply": "Holding this.",
+        },
+    )
+    assert support.status_code == 200
+    assert support.json()["category"] == "support"
+
+
+def test_a_vendor_footer_with_a_sort_code_is_an_invoice_not_suspicious():
+    email = {
+        "id": "gate-sort-footer",
+        "from_name": "Accounts",
+        "from_email": "accounts@papersupply.example",
+        "subject": "Invoice 1042",
+        "body": (
+            "Hello,\n\n"
+            "Invoice 1042\n"
+            "Amount due £1,200\n\n"
+            "Sort code: 20-00-00\n"
+            "Account: 12345678\n\n"
+            "Paper Supply\n"
+        ),
+    }
+    result = classify_rules(email)
+    assert result.category == "invoice"
+    assert "payment_change" not in result.risk_flags
+    assert hard_flags(result.risk_flags) == []
+    assert payment_related(email["body"]) is True
 
 
 def test_accept_cannot_promote_suspicious_even_when_flags_are_empty(client):

@@ -387,6 +387,17 @@ def create_triage(payload: TriageIn) -> dict:
                 "reasons": ["payment-related: verify by phone"],
             },
         )
+    if payload.category == "lead":
+        blocking = security_flags(email)
+        if blocking:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "security",
+                    "message": "blocked: verify by phone or security review",
+                    "reasons": blocking,
+                },
+            )
     stored = save_classification(email, _classification(payload))
     return db.public_triage(
         {**stored, "subject": email["subject"], "mailbox_name": email["from_name"], "from_email": email["from_email"], "body": email["body"], "received_at": email["received_at"]},
@@ -478,6 +489,15 @@ def payment_related_message(email: dict) -> bool:
     from app.risk import payment_related
 
     return payment_related(_readable(email))
+
+
+def security_flags(email: dict) -> list[str]:
+    """Hard flags on the stored message. A lead label cannot be written over them."""
+    from app.gate import _readable
+    from app.risk import assess_risk, hard_flags
+
+    readable = _readable(email)
+    return hard_flags(assess_risk(email, readable, email.get("body") or ""))
 
 
 @app.post("/api/crm/leads")
