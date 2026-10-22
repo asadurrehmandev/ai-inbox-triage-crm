@@ -148,7 +148,7 @@ class EmailIn(BaseModel):
 
 class TriageIn(BaseModel):
     email_id: str
-    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious", "review"]
+    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious", "review", "recruiter"]
     confidence: float = Field(ge=0, le=1)
     name: str | None = None
     company: str | None = None
@@ -163,7 +163,7 @@ class DraftIn(BaseModel):
 
 
 class AcceptIn(BaseModel):
-    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious"] | None = None
+    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious", "recruiter"] | None = None
     confirm: bool = False
 
 
@@ -241,13 +241,13 @@ def stats() -> dict:
     emails = db.list_emails()
     triage = db.list_triage(limit=None)
     leads = db.list_leads()
-    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")}
+    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review", "recruiter")}
     approved = 0
     for item in triage:
         by_category[item["category"]] = by_category.get(item["category"], 0) + 1
         if item["approved"]:
             approved += 1
-    actionable = [item for item in triage if item["category"] not in {"spam", "suspicious", "review"}]
+    actionable = [item for item in triage if item["category"] not in {"spam", "suspicious", "review", "recruiter"}]
     processed = len(triage)
     actionable_count = len(actionable)
     approved = sum(1 for item in actionable if item["approved"])
@@ -539,19 +539,21 @@ def approve_reply(triage_id: int) -> dict:
         raise HTTPException(status_code=409, detail="already approved") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="Triage record not found")
-    alerts.post_alert(
-        row["category"],
-        {
-            "email_id": row["email_id"],
-            "name": row["name"],
-            "company": row["company"],
-            "subject": row["subject"],
-            "budget": row["budget"],
-            "intent": row["intent"],
-        },
-        title="Reply approved",
-        body=f"Approved reply for {row['name'] or row['mailbox_name'] or 'the sender'} — {row['subject']}",
-    )
+    # Approving a suspicious row archives it. It does not announce a reply.
+    if row["category"] != "suspicious":
+        alerts.post_alert(
+            row["category"],
+            {
+                "email_id": row["email_id"],
+                "name": row["name"],
+                "company": row["company"],
+                "subject": row["subject"],
+                "budget": row["budget"],
+                "intent": row["intent"],
+            },
+            title="Reply approved",
+            body=f"Approved reply for {row['name'] or row['mailbox_name'] or 'the sender'} — {row['subject']}",
+        )
     return db.public_triage(row, full_body=True)
 
 

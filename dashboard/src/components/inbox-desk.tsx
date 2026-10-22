@@ -42,6 +42,7 @@ const MORE_FILTERS = [
   { id: "support", label: "Support" },
   { id: "invoice", label: "Invoice" },
   { id: "spam", label: "Spam" },
+  { id: "recruiter", label: "Recruiters" },
   { id: "waiting", label: "Waiting" },
   { id: "all", label: "All" },
 ] as const;
@@ -49,12 +50,13 @@ const MORE_FILTERS = [
 type FilterId = (typeof MAIN_FILTERS)[number]["id"] | (typeof MORE_FILTERS)[number]["id"];
 
 function isUrgent(item: Triage) {
+  if (item.category === "suspicious" || item.category === "spam" || item.category === "recruiter") return false;
   return item.category === "urgent" || (item.secondary_categories || []).includes("urgent");
 }
 
 function matches(item: Triage, filter: FilterId) {
   if (filter === "approval") {
-    return !item.approved && !["spam", "suspicious", "review"].includes(item.category);
+    return !item.approved && !["spam", "suspicious", "review", "recruiter"].includes(item.category);
   }
   if (filter === "all" || filter === "waiting") return true;
   if (filter === "urgent") return isUrgent(item);
@@ -97,7 +99,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
     for (const item of desk.items) {
       next[item.category] = (next[item.category] ?? 0) + 1;
       if (isUrgent(item)) next.urgent = (next.urgent ?? 0) + (item.category === "urgent" ? 0 : 1);
-      if (!item.approved && !["spam", "suspicious", "review"].includes(item.category)) {
+      if (!item.approved && !["spam", "suspicious", "review", "recruiter"].includes(item.category)) {
         next.approval = (next.approval ?? 0) + 1;
       }
     }

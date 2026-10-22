@@ -51,7 +51,6 @@ export function LaneShell({ children }: { children: ReactNode }) {
   const navOpen = navPath != null && navPath === pathname;
   const stats = desk.stats;
   const title = pageTitle(pathname);
-  const onInbox = title === "Inbox";
   const lastRun = desk.worker?.last_run?.finished_at;
 
   useEffect(() => {
@@ -92,7 +91,7 @@ export function LaneShell({ children }: { children: ReactNode }) {
               ) : null}
               <Button
                 type="button"
-                variant={onInbox ? "outline" : "default"}
+                variant="outline"
                 onClick={() => void desk.runIntake()}
                 disabled={desk.busy || desk.pending.length === 0}
               >

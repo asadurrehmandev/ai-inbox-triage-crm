@@ -34,7 +34,7 @@ export type ReaderActions = {
   primaryLabel: string;
 };
 
-const ARCHIVE = new Set(["spam", "suspicious", "review"]);
+const ARCHIVE = new Set(["spam", "suspicious", "review", "recruiter"]);
 
 export function ApprovalCard({
   item,
@@ -121,7 +121,7 @@ export function ApprovalCard({
     !confirm &&
     Boolean(onAccept) &&
     (item.category === "lead" || (item.category === "review" && item.suggested_category === "lead"));
-  const canPrimary = !busy && !item.approved;
+  const canPrimary = !busy && !item.approved && item.category !== "suspicious";
 
   useEffect(() => {
     if (item.edited) return;
@@ -252,14 +252,16 @@ export function ApprovalCard({
   );
 
   return (
-    <article className="flex h-full min-h-0 flex-col">
+    <article className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <header className="border-b border-border px-4 py-4 md:px-5">
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusBadge tone={categoryTone(item.category)}>{categoryLabel(item.category)}</StatusBadge>
           <Tooltip>
             <TooltipTrigger asChild>
-              <button type="button" className="rounded-sm">
-                <StatusBadge tone={confidence.tone}>{confidence.label}</StatusBadge>
+              <button type="button" className="inline-flex items-center justify-center rounded-sm max-md:min-h-11 max-md:min-w-11">
+                <StatusBadge tone={confidence.tone} className="max-md:h-11 max-md:min-w-11 max-md:px-3">
+                  {confidence.label}
+                </StatusBadge>
               </button>
             </TooltipTrigger>
             <TooltipContent>
@@ -310,7 +312,7 @@ export function ApprovalCard({
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 pb-6 md:px-5">
+      <div className="min-h-0 overflow-auto px-4 py-4 pb-8 md:px-5">
         <div className="max-w-[72ch] text-base leading-[22px] whitespace-pre-wrap">{item.body}</div>
         <div className="mt-6 flex items-baseline justify-between gap-3">
           <h3 className="text-xs font-medium text-muted-foreground">
@@ -340,7 +342,9 @@ export function ApprovalCard({
                 ? payment
                   ? "payment-related: verify by phone. Nothing was written to the CRM."
                   : "A person has to accept this before it can be filed. Nothing was written to the CRM."
-                : "Spam is not answered and is not written to the CRM."}
+                : item.category === "recruiter"
+                  ? "A recruiting note is not a client lead and is not written to the CRM."
+                  : "Spam is not answered and is not written to the CRM."}
           </p>
         ) : null}
         {note ? <p className="mt-2 text-sm text-muted-foreground">{note}</p> : null}

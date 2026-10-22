@@ -15,7 +15,7 @@ from app.offline import uncertain_label
 from app.prepare import head_and_tail, hidden_text, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
 from app.risk import assess_risk, hard_flags, known_contact_lookalike, payment_related
 
-CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")
+CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review", "recruiter")
 
 _CLOSINGS = re.compile(
     r"^(thanks|thank you|best regards|kind regards|warm regards|many thanks|best|regards|sincerely|cheers|warmly|cordialement|saludos|mit freundlichen grüßen),?\s*$",
@@ -97,8 +97,71 @@ _OOO = re.compile(
 )
 _OUTAGE = re.compile(
     r"\b(?:production is down|went down|is down|are down|outage|site down|sev-?1|p0|"
-    r"fora do ar|ca[ií]da|en panne|ausgefallen)\b|宕机|障害が発生|サイトが(?:ダウン|落ち)",
+    r"offline|not responding|"
+    r"can(?:not|'t) take bookings|unable to take bookings|"
+    r"fora do ar|ca[ií]d[oa]|en panne|ausgefallen|hors service)\b"
+    r"|宕机|障害が発生|サイトが(?:ダウン|落ち)",
     re.IGNORECASE,
+)
+_SERVICE = (
+    r"system|systems|site|website|platform|checkout|booking|bookings|orders?|"
+    r"shop|portal|service|servicio|sistema|pedidos|caisse|kassa|服务器|系统|サイト"
+)
+_DOWN_WORD = (
+    r"offline|not working|isn'?t working|does(?:n'?t| not) work|stopped working|"
+    r"no funciona|n[aã]o funciona|ne fonctionne pas|funktioniert nicht|"
+    r"hors service|ca[ií]d[oa]|ausgefallen|fora do ar|en panne|çalışmıyor|calismiyor"
+)
+_NOT_URGENT = re.compile(
+    r"\b(?:not urgent|no rush|no hurry|low priority|whenever you (?:can|have)|"
+    r"when you have time|pas urgent|no es urgente|nicht dringend|acil de[gğ]il)\b",
+    re.IGNORECASE,
+)
+_INVOICE_EVIDENCE = re.compile(
+    r"\b(?:amount due|balance due|payment due|total due|please pay|kindly pay|"
+    r"pay this invoice|invoice\s*#?\s*\d+|inv-\d+|past due|remittance|"
+    r"payment received|your receipt|receipt for|order receipt|trip receipt|"
+    r"importe pendiente|montant d[uû]|offene(?:r|n)? betrag|valor em aberto|"
+    r"应付|請求書|お支払額)\b"
+    r"|factura\s*(?:n[oº.]|no|#|\d)"
+    r"|rechnung\s*(?:nr|#|\d)"
+    r"|fatura\s*(?:n|#|\d)",
+    re.IGNORECASE,
+)
+_RECRUITER = re.compile(
+    r"\b(?:recruiter|talent (?:partner|acquisition|team)|"
+    r"your (?:resume|cv)|open role|job opening|"
+    r"this role pays|base salary|compensation range|\bote\b|"
+    r"interview (?:process|for the role)|we(?:'re| are) hiring for)\b",
+    re.IGNORECASE,
+)
+_SALARY = re.compile(
+    r"\b(?:salary|compensation|\bote\b|per annum|annually|base pay)\b",
+    re.IGNORECASE,
+)
+_REFERRAL = re.compile(
+    r"\b(?:referred me|a referral|recommended you|suggested I (?:write|reach|contact)|"
+    r"heard about you|gave me your (?:name|email))\b",
+    re.IGNORECASE,
+)
+_COMMERCIAL = re.compile(
+    r"\b(?:quote|quotation|proposal|retainer|budget|sow|statement of work|"
+    r"scope of work|s[oö]zle[sş]me|合同|契約|bütçe|预算|予算|or[cç]amento|presupuesto|devis)\b",
+    re.IGNORECASE,
+)
+_SUPPORTISH = re.compile(
+    r"\b(?:not working|isn'?t working|does(?:n'?t| not) work|is broken|broken|bug|"
+    r"can(?:not|'t) log ?in|cannot log ?in|password|login loop|feature request|"
+    r"how do i|could you (?:add|fix|check)|stopped syncing|is not pushing|"
+    r"no funciona|ne fonctionne pas|funktioniert nicht|çalışmıyor)\b",
+    re.IGNORECASE,
+)
+_RENEWAL = re.compile(
+    r"\b(?:domain|subscription|licen[cs]e|certificate|ssl|hosting|membership)\b"
+    r".{0,40}\b(?:renew(?:al)?|expires?|expiry|expiration)\b"
+    r"|\b(?:renew(?:al)?|expires?|expiry|expiration)\b.{0,40}"
+    r"\b(?:domain|subscription|licen[cs]e|certificate|ssl|hosting|membership)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _OVERDUE = re.compile(
     r"\b(?:past due|overdue|\d+\s+days?\s+(?:past|over)due|final notice|final demand)\b",
@@ -167,7 +230,7 @@ def _plain(email: dict) -> str:
 
 
 def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
-    scores = {name: 0.0 for name in ("lead", "support", "invoice", "spam", "urgent")}
+    scores = {name: 0.0 for name in ("lead", "support", "invoice", "spam", "urgent", "recruiter")}
     reasons: list[str] = []
     lowered = text.lower()
     sender = (email.get("from_email") or "").lower()
@@ -191,23 +254,19 @@ def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
         scores["spam"] += 6
         scores["lead"] -= 6
 
-    if re.search(r"\b(invoice|rechnung|amount due|past due|payment due|net\s?\d+|remittance|payment received)\b", lowered):
+    if _invoice_evidence(lowered):
+        scores["invoice"] += 5
+        note("an amount due, an invoice number, or a payment request")
+    if re.search(r"\b(we(?:'ve| have) wired|we have sent the payment|your receipt|payment received|receipt for)\b", lowered):
         scores["invoice"] += 4
-        note("billing language")
-    if re.search(r"\binv-\d+\b", lowered):
-        scores["invoice"] += 3
-        note("invoice number")
-    if re.search(r"\b(we(?:'ve| have) wired|we have sent the payment|your receipt|payment of)\b", lowered):
-        scores["invoice"] += 4
+        scores["lead"] -= 4
+        scores["urgent"] -= 4
         note("a payment receipt")
     if _REFUND.search(lowered):
         scores["invoice"] += 6
         scores["lead"] -= 5
 
-    outage = _OUTAGE.search(lowered) or re.search(
-        r"\b(went down|is down|are down|production is down|outage|offline|not responding)\b",
-        lowered,
-    )
+    outage = is_outage(lowered)
     impact = re.search(r"\b(every|all|nobody|customers?|patients?|orders|shoppers?)\b", lowered)
     harm = re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered)
     http_error = re.search(r"\b5\d\d\b", lowered)
@@ -261,6 +320,12 @@ def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
         note("a budget and a request")
     if re.search(r"\b(build (?:us |me )?|automatiz|見積)", lowered):
         scores["lead"] += 2
+    if _COMMERCIAL.search(lowered) and extract_budget(lowered):
+        scores["lead"] += 4
+        note("a contract, scope, or budget")
+    if _REFERRAL.search(lowered):
+        scores["lead"] += 4
+        note("a referral")
 
     if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
         scores["support"] += 4
@@ -271,6 +336,36 @@ def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
         scores["support"] += 4
     if re.search(r"\b(can you (?:check|look|take a look)|when you have a minute)\b", lowered):
         scores["support"] += 2
+    if _SUPPORTISH.search(lowered):
+        scores["support"] += 3
+        if not _COMMERCIAL.search(lowered):
+            scores["support"] = max(scores["support"], 5.0)
+        note("a support question")
+    if existing_thread(email) and _SUPPORTISH.search(lowered) and not _COMMERCIAL.search(lowered):
+        scores["support"] += 4
+        scores["lead"] -= 5
+        note("a support thread")
+    if _RECRUITER.search(lowered):
+        scores["lead"] = 0
+        scores["invoice"] = 0
+        scores["recruiter"] = 6
+        note("a recruiter")
+    if _RENEWAL.search(lowered):
+        scores["lead"] = 0
+        if _invoice_evidence(lowered) or extract_budget(lowered):
+            scores["invoice"] = max(scores["invoice"], 5)
+            note("a renewal")
+        else:
+            scores["spam"] = max(scores["spam"], 5)
+            note("an expiry notice")
+    if _NOT_URGENT.search(lowered) or (_SUPPORTISH.search(lowered) and not is_outage(lowered)):
+        scores["urgent"] = 0
+        if _NOT_URGENT.search(lowered):
+            note("the sender says it is not urgent")
+    if scores["invoice"] > 0 and not _invoice_evidence(lowered) and scores["recruiter"] < 4:
+        # A budget or a contract is not an invoice. Receipts and renewals already counted.
+        if "a payment receipt" not in reasons and "a renewal" not in reasons:
+            scores["invoice"] = 0
 
     if _VENDOR.search(lowered) or re.search(r"\b(no-?reply|noreply)\b", sender):
         scores["lead"] -= 8
@@ -291,6 +386,15 @@ def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
     guessed = None
     if max(scores.values()) < 4:
         guessed, _margin = uncertain_label(lowered)
+        if guessed == "invoice" and not _invoice_evidence(lowered):
+            guessed = None
+        if guessed == "urgent" and not is_outage(lowered):
+            guessed = None
+        if guessed == "lead" and (
+            _RECRUITER.search(lowered)
+            or (existing_thread(email) and _SUPPORTISH.search(lowered) and not _COMMERCIAL.search(lowered))
+        ):
+            guessed = None
         if guessed in scores:
             scores[guessed] = max(scores[guessed], 5.0)
     if (
@@ -483,6 +587,11 @@ def _tidy_company(line: str) -> str:
 
 def _same_as_sender_name(line: str, sender: str) -> bool:
     """A first name, or the whole display name, is not the company."""
+    def squash(value: str) -> str:
+        return re.sub(r"\s+", "", (value or "").casefold())
+
+    if squash(line) and squash(line) == squash(sender):
+        return True
     words = [word.lower().strip(".") for word in line.split() if word.strip(".")]
     tokens = [word.lower().strip(".") for word in (sender or "").split() if word.strip(".")]
     if not words or not tokens:
@@ -535,12 +644,45 @@ def summarize(text: str, limit: int = 110) -> str:
     return sentence
 
 
-def extract_intent(category: str, text: str) -> str:
-    summary = summarize(text)
-    if summary:
-        return summary
+def _body_sentences(body: str) -> list[str]:
+    kept: list[str] = []
+    for line in (body or "").splitlines():
+        line = line.strip()
+        if not line or _GREETING.match(line) or _CLOSINGS.match(line) or _HEADER_LINE.match(line):
+            continue
+        if line.endswith(",") and len(line.split()) <= 4:
+            continue
+        kept.append(line)
+    blob = re.sub(r"\s+", " ", " ".join(kept)).strip()
+    if not blob:
+        return []
+    return [part.strip(" -") for part in re.split(r"(?<=[.!?])\s+", blob) if part.strip()]
+
+
+def extract_intent(category: str, text: str, subject: str = "", budget: str | None = None) -> str:
+    """One line about the ask. The subject is not copied in front of it."""
+    sentences = _body_sentences(text)
+    chosen = ""
+    for sentence in sentences:
+        if subject and sentence.casefold().strip() == subject.casefold().strip():
+            continue
+        chosen = sentence
+        break
+    if not chosen and sentences:
+        chosen = sentences[0]
+    if len(chosen) > 110:
+        clipped = chosen[:109].rsplit(" ", 1)[0]
+        chosen = (clipped or chosen[:109]).rstrip(".,;:") + "…"
+    if category == "lead" and budget and budget.casefold() not in chosen.casefold():
+        chosen = f"{chosen} · {budget}".strip(" ·")
+    if category == "invoice" and budget and budget.casefold() not in chosen.casefold():
+        chosen = f"{chosen} · {budget}".strip(" ·")
+    if chosen:
+        return chosen
     if category == "suspicious":
         return "Suspicious message. Do not pay or reply."
+    if category == "recruiter":
+        return "A recruiter. A salary is not a project budget."
     if category == "spam":
         return "Unsolicited message."
     return "Read the message."
@@ -559,6 +701,8 @@ def draft_reply(
         return f"No reply. Flagged as suspicious: {listed}."
     if category == "spam":
         return "No reply. This was filed as spam and will not be answered."
+    if category == "recruiter":
+        return "No reply. This is a recruiting note, not a client lead, and it is not written to the CRM."
     first = name.split()[0] if name else None
     hello = f"Hi {first}," if first else "Hi,"
     if category == "lead":
@@ -645,12 +789,44 @@ def existing_thread(email: dict) -> bool:
     return False
 
 
+def _invoice_evidence(text: str) -> bool:
+    """An amount due, an invoice number, a receipt, or a request to pay. A budget alone is not one."""
+    if _INVOICE_EVIDENCE.search(text or "") or _REFUND.search(text or ""):
+        return True
+    if re.search(r"\b(?:payment of|payment will be charged|charged to (?:the |your )?card|amount\s*:)\b", text or "", re.IGNORECASE):
+        return True
+    if extract_budget(text or "") and re.search(
+        r"\b(?:invoice|receipt|bill|rechnung|factura|fatura|請求書|发票)\b",
+        text or "",
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def is_outage(text: str) -> bool:
-    """A service failure, not a same-day sales deadline or a single failed job."""
+    """A service failure, not a same-day sales deadline or a single failed job.
+
+    'Not working' counts when a system, site, checkout, or booking flow is the
+    thing that failed. A single form or a login for one person stays support.
+    """
     lowered = text or ""
     if _OUTAGE.search(lowered):
         return True
-    if re.search(r"\b5\d\d\b", lowered) and re.search(
+    if re.search(
+        rf"\b(?:{_SERVICE})\b.{{0,48}}\b(?:{_DOWN_WORD})\b|\b(?:{_DOWN_WORD})\b.{{0,48}}\b(?:{_SERVICE})\b",
+        lowered,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"\b(?:emergency|emergencia)\b", lowered, re.IGNORECASE) and re.search(
+        rf"\b(?:{_SERVICE}|offline|down|ca[ií]d[oa]|bookings)\b",
+        lowered,
+        re.IGNORECASE,
+    ):
+        return True
+    # A price like $4,500 is not an HTTP 500. The status has to stand alone.
+    if re.search(r"(?<![\d,.])\b5\d\d\b(?![\d,.])", lowered) and re.search(
         r"\b(customers?|orders?|patients?|checkout|shoppers?)\b",
         lowered,
         re.IGNORECASE,
@@ -752,12 +928,15 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
         name = None
         company = None
+    body_only = strip_quotes(strip_injection_notes(html_to_text(prepared.get("body") or "")))
     budget = extract_budget(text)
+    if budget and (category == "recruiter" or _SALARY.search(text) or _RECRUITER.search(text)):
+        budget = None
     if budget and category == "review" and "a price is written in the message" not in reasons:
         reasons = [*reasons, "a price is written in the message"]
     if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
         budget = None
-    intent = extract_intent(category, text)
+    intent = extract_intent(category, body_only, prepared.get("subject") or "", budget)
     concealed = hidden_text(raw)
     readable = f"{prepared.get('subject') or ''}\n{text}\n{concealed}"
     # Payment mail is not filed and is not urgent. The person verifies it by phone.
@@ -779,7 +958,7 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     elif category == "urgent" and not known_sender(prepared, known_contacts) and not existing_thread(prepared):
         if "unverified sender" not in reasons:
             reasons.append("unverified sender")
-    if (category == "invoice" or suggested == "invoice") and _OVERDUE.search(readable):
+    if category != "suspicious" and (category == "invoice" or suggested == "invoice") and _OVERDUE.search(readable):
         if "urgent" not in secondary:
             secondary = [*secondary, "urgent"]
         if "overdue invoice" not in reasons:

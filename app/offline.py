@@ -19,9 +19,9 @@ CLASSES = ("lead", "support", "invoice", "spam", "urgent")
 _HASH = 2048
 _LEX = {
     "lead": (
-        r"\b(?:quote|quotation|proposal|retainer|ballpark|discovery call|how much|what would it cost)\b",
-        r"cotizaci[oó]n|presupuesto|devis|angebot|or[cç]amento|teklif|offerte",
-        r"报价|预算|お見積|ご相談",
+        r"\b(?:quote|quotation|proposal|retainer|ballpark|discovery call|how much|what would it cost|scope of work|statement of work)\b",
+        r"cotizaci[oó]n|presupuesto|devis|angebot|or[cç]amento|teklif|offerte|s[oö]zle[sş]me|bütçe",
+        r"报价|预算|合同|工作说明|お見積|ご相談|契約|作業範囲",
     ),
     "support": (
         r"\b(?:not working|doesn't work|does not work|stopped syncing|isn't pushing|is not pushing|is broken|password reset)\b",

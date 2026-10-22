@@ -28,6 +28,12 @@ _BRANDS: dict[str, tuple[str, ...]] = {
     "fedex": ("fedex.com",),
     "ups": ("ups.com",),
     "amazon": ("amazon.com", "amazon.co.uk"),
+    "upwork": ("upwork.com",),
+    "linkedin": ("linkedin.com",),
+    "dropbox": ("dropbox.com",),
+    "intuit": ("intuit.com",),
+    "quickbooks": ("quickbooks.com", "intuit.com"),
+    "zoom": ("zoom.us", "zoom.com"),
 }
 
 _FREE_MAIL = {
@@ -119,6 +125,22 @@ _BANK_VERIFY = re.compile(
 )
 _SQUAT_LABEL = re.compile(
     r"payments?|payouts?|billing|invoices?|secure-?login|verify",
+    re.IGNORECASE,
+)
+# A payment-shaped note that also asks the reader to verify, release funds,
+# or pay through a link. The words are the shape, not one mailbox's copy.
+_PAYMENT_SHAPE = re.compile(
+    r"\b(?:invoices?|withdrawals?|payouts?|payments?|amount due|past due|overdue|remittance)\b",
+    re.IGNORECASE,
+)
+_PAY_LURE = re.compile(
+    r"\b(?:verify|confirm|validate|update)\b[^.\n]{0,80}\b(?:your\s+)?"
+    r"(?:withdrawal(?:\s+method)?|payout(?:\s+method)?|bank(?:ing)?(?:\s+account)?|"
+    r"payment\s+method|billing\s+details)\b"
+    r"|\brelease\s+(?:the\s+)?funds\b"
+    r"|\b(?:pay|payment|invoice)\b[^.\n]{0,60}\bsecure\s+link\b"
+    r"|\bsecure\s+link\b[^.\n]{0,60}\b(?:pay|payment|invoice)\b"
+    r"|\bpay\b[^.\n]{0,48}\b(?:via|using|through)\b[^.\n]{0,32}\b(?:secure\s+)?link\b",
     re.IGNORECASE,
 )
 _MACHINE = re.compile(r"\b[a-z][a-z0-9_]{2,}\s*=\s*[^\s;,]{1,40}", re.IGNORECASE)
@@ -335,6 +357,33 @@ def free_mail(address: str) -> bool:
     return _domain(address) in _FREE_MAIL
 
 
+def _damerau(left: str, right: str) -> int:
+    """Edit distance, counting one adjacent transposition as a single edit."""
+    if left == right:
+        return 0
+    if abs(len(left) - len(right)) > 1:
+        return 2
+    rows = len(left) + 1
+    cols = len(right) + 1
+    dist = [[0] * cols for _ in range(rows)]
+    for i in range(rows):
+        dist[i][0] = i
+    for j in range(cols):
+        dist[0][j] = j
+    for i in range(1, rows):
+        low = 2
+        for j in range(1, cols):
+            cost = 0 if left[i - 1] == right[j - 1] else 1
+            dist[i][j] = min(dist[i - 1][j] + 1, dist[i][j - 1] + 1, dist[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and left[i - 1] == right[j - 2] and left[i - 2] == right[j - 1]:
+                dist[i][j] = min(dist[i][j], dist[i - 2][j - 2] + 1)
+            if dist[i][j] < low:
+                low = dist[i][j]
+        if low > 1:
+            return 2
+    return dist[-1][-1]
+
+
 def _edit_distance(left: str, right: str) -> int:
     if abs(len(left) - len(right)) > 2:
         return 3
@@ -366,6 +415,31 @@ def lookalike_domain(address: str) -> bool:
                 return True
             # The raw domain only matches the brand after homoglyph folding.
             if folded != domain and _legit(folded, suffixes):
+                return True
+    return _brand_typosquat(folded)
+
+
+def _brand_typosquat(domain: str) -> bool:
+    """One edit, or one adjacent swap, from a known brand label. Short brands are skipped."""
+    if not domain or "." not in domain:
+        return False
+    tokens: list[str] = []
+    for part in re.split(r"[.\-]", domain):
+        if len(part) < 5:
+            continue
+        tokens.append(part)
+        leet = part.translate(_LEET)
+        if leet != part:
+            tokens.append(leet)
+    for token in tokens:
+        for brand, suffixes in _BRANDS.items():
+            if len(brand) < 5 or _legit(domain, suffixes):
+                continue
+            if brand in token:
+                continue
+            if abs(len(token) - len(brand)) > 1:
+                continue
+            if _damerau(token, brand) <= 1:
                 return True
     return False
 
@@ -745,6 +819,37 @@ def payment_related(text: str) -> bool:
     )
 
 
+def _known_contact_domain(domain: str, known_contacts: list[dict] | None) -> bool:
+    if not domain or not known_contacts:
+        return False
+    for contact in known_contacts:
+        if _domain(contact.get("email") or "") == domain:
+            return True
+    return False
+
+
+def payment_lure(text: str, sender: str, known_contacts: list[dict] | None = None) -> bool:
+    """Invoice, payout, or withdrawal mail that asks to verify, release funds, or pay via a link.
+
+    A typo-squat of a known brand, a generic invoice or billing host, or any
+    other sender domain that is not a known contact, makes that request
+    suspicious. A real brand's own domain, and a domain already in the CRM,
+    are left to the other checks.
+    """
+    folded = fold(text or "")
+    if not (_PAYMENT_SHAPE.search(folded) and _PAY_LURE.search(folded)):
+        return False
+    domain = _domain(sender)
+    hosts = [host for host in (domain, *_urls(folded)) if host]
+    if any(lookalike_domain(host) or _squat_host(host) for host in hosts):
+        return True
+    if not domain or _known_contact_domain(domain, known_contacts):
+        return False
+    if any(_legit(domain, suffixes) for suffixes in _BRANDS.values()):
+        return False
+    return True
+
+
 def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict] | None = None) -> list[str]:
     """Return risk flags. A suppression note is recorded and does not force the category."""
     flags: list[str] = []
@@ -781,6 +886,8 @@ def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict
         flags.append("payment_request")
     if _credential_request(combined, sender):
         flags.append("credential_request")
+    if payment_lure(combined, sender, known_contacts):
+        flags.append("payment_lure")
     if _DANGEROUS_FILE.search(combined) or _DANGEROUS_FILE.search(body or ""):
         flags.append("dangerous_attachment")
     if channels.obfuscated:
@@ -821,7 +928,7 @@ def blocks_autofile(email: dict, text: str, flags: list[str], budget: str | None
     account is blocked. So is any message that changes a wire, ACH, routing
     number, or bank detail, even when a model called it a lead.
     """
-    if category in {"spam", "suspicious", "review"}:
+    if category in {"spam", "suspicious", "review", "recruiter"}:
         return True
     if hard_flags(flags) or "budget_not_in_body" in flags:
         return True

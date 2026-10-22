@@ -65,6 +65,12 @@ _HOURLY = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})\s*/\s*hr\b", re.IGNORE
 _YEN_MAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万円")
 _YEN_MARK = re.compile(r"(?:¥|￥)\s*(?P<num>\d[\d,]*)|(?P<num2>\d[\d,]*)\s*円")
 _YUAN = re.compile(r"(?P<num>\d[\d,]*)\s*元|(?:RMB|CNY)\s*(?P<num2>\d[\d,]*)")
+_NAMED_CURRENCY = re.compile(
+    rf"(?:(?P<code>TRY|TL|PKR|SEK|CHF|AUD|CAD|INR|PLN|NOK|DKK|SGD|NZD|AED)\s*(?P<num>{_NUM})"
+    rf"|(?P<num2>{_NUM})\s*(?P<code2>TRY|TL|PKR|SEK|CHF|AUD|CAD|INR|PLN|NOK|DKK|SGD|NZD|AED|kr)\b"
+    rf"|(?<![A-Za-z])Rs\.?(?![A-Za-z])\s*(?P<num3>{_NUM})|(?P<num4>{_NUM})\s*Rs\.?(?![A-Za-z]))",
+    re.IGNORECASE,
+)
 _GRAND = re.compile(r"(?<![A-Za-z])(?P<num>\d+(?:\.\d+)?)\s*grand\b", re.IGNORECASE)
 _PREFIX = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})(?!\s*k\b)", re.IGNORECASE)
 _SUFFIX = re.compile(rf"(?P<num>{_NUM})\s?(?P<cur>USD|EUR|GBP|€|£|\$)", re.IGNORECASE)
@@ -199,6 +205,17 @@ def extract_budget(text: str) -> str | None:
     yen_mark = _YEN_MARK.search(text)
     if yen_mark:
         return _fmt("¥", parse_number(yen_mark.group("num") or yen_mark.group("num2")))
+    named = _NAMED_CURRENCY.search(text)
+    if named:
+        code = (named.group("code") or named.group("code2") or "").upper()
+        if named.group("num3") or named.group("num4"):
+            code = "Rs"
+        raw = named.group("num") or named.group("num2") or named.group("num3") or named.group("num4")
+        amount = parse_number(raw)
+        label = {"TL": "TRY"}.get(code, code)
+        if abs(amount - round(amount)) < 0.001:
+            return f"{label} {int(round(amount)):,}"
+        return f"{label} {amount:,.2f}"
     yuan = _YUAN.search(text)
     if yuan:
         amount = parse_number(yuan.group("num") or yuan.group("num2"))

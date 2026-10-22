@@ -162,7 +162,7 @@ def _email_fields(email: dict) -> dict:
 def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool = False) -> dict:
     """Apply the reviewer's label. The filing gate runs here, not in the button."""
     target = category or row.get("suggested_category")
-    if target not in {"lead", "support", "invoice", "spam", "urgent", "suspicious"}:
+    if target not in {"lead", "support", "invoice", "spam", "urgent", "suspicious", "recruiter"}:
         raise ValueError("no suggested label")
     if row.get("approved") and target != "lead":
         raise AlreadyApproved(row["id"])

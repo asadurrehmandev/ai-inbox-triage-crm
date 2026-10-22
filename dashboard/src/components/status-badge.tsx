@@ -24,10 +24,12 @@ export function scoreSource(model: string) {
 
 export function StatusBadge({
   tone,
+  className,
   children,
 }: {
   tone: Tone;
+  className?: string;
   children: ReactNode;
 }) {
-  return <Badge variant={tone}>{children}</Badge>;
+  return <Badge variant={tone} className={className}>{children}</Badge>;
 }

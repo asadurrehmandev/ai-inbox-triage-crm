@@ -167,3 +167,145 @@ def test_access_log_drops_the_query_string():
     assert record.args[2] == "/api/triage/1/live?redacted"
     assert "sk-ant" not in record.args[2]
     assert len(record.args) == 5
+
+
+def test_an_unknown_payout_lure_is_suspicious_and_not_urgent():
+    result = classify_rules(
+        {
+            "from_name": "Billing",
+            "from_email": "billing@harbor-invoices.example",
+            "subject": "Payout",
+            "body": (
+                "A payout of $2,200 is waiting. Verify your withdrawal method to release funds: "
+                "https://harbor-invoices.example/go\n"
+            ),
+        }
+    )
+    assert result.category == "suspicious"
+    assert "urgent" not in result.secondary_categories
+
+
+def test_a_brand_typosquat_pay_link_is_suspicious():
+    result = classify_rules(
+        {
+            "from_name": "Accounts",
+            "from_email": "accounts@upwrok-billing.com",
+            "subject": "Payment waiting",
+            "body": "Client payment of $900 is waiting. Verify your withdrawal method to release funds.\n",
+        }
+    )
+    assert result.category == "suspicious"
+    assert result.category != "invoice"
+
+
+def test_a_vendor_invoice_without_a_lure_stays_an_invoice():
+    result = classify_rules(
+        {
+            "from_name": "Mara Lind",
+            "from_email": "mara@lindstudio.example",
+            "subject": "Invoice 19",
+            "body": "Invoice 19 is attached. The amount due is $640.\n\nMara Lind\nLind Studio\n",
+        }
+    )
+    assert result.category == "invoice"
+
+
+def test_a_stranger_outage_is_urgent():
+    offline = classify_rules(
+        {
+            "from_name": "Noah",
+            "from_email": "noah@harbor.example",
+            "subject": "Bookings",
+            "body": "The booking system is offline and we cannot take bookings. Please help.\n",
+        }
+    )
+    assert offline.category == "urgent"
+    assert "unverified sender" in offline.reasons
+    spanish = classify_rules(
+        {
+            "from_name": "Lucia",
+            "from_email": "lucia@plaza.example",
+            "subject": "Pedidos",
+            "body": "El sistema de pedidos está caído y no entra nada.\n",
+        }
+    )
+    assert spanish.category == "urgent"
+    assert "unverified sender" in spanish.reasons
+
+
+def test_not_urgent_support_is_support():
+    result = classify_rules(
+        {
+            "from_name": "Owen",
+            "from_email": "owen@park.example",
+            "subject": "Export",
+            "body": "Not urgent at all. The export button on my settings page is broken.\n",
+        }
+    )
+    assert result.category == "support"
+    assert result.suggested_category != "urgent"
+
+
+def test_a_support_thread_is_not_a_lead():
+    result = classify_rules(
+        {
+            "from_name": "Imani",
+            "from_email": "imani@river.example",
+            "subject": "Re: login loop",
+            "body": "I still cannot log in. This is the same bug, not a new project.\n",
+        }
+    )
+    assert result.category == "support"
+
+
+def test_a_recruiter_salary_is_not_a_budget():
+    result = classify_rules(
+        {
+            "from_name": "Priya Nair",
+            "from_email": "priya@talentpath.example",
+            "subject": "Role",
+            "body": "I am a recruiter. We have an open role. The base salary is $140,000.\n",
+        }
+    )
+    assert result.category == "recruiter"
+    assert result.budget is None
+
+
+def test_a_contract_with_a_budget_is_a_lead():
+    from app.budget import extract_budget
+
+    assert extract_budget("The budget is 90.000 TL.") == "TRY 90,000"
+    assert extract_budget("We can spend PKR 250,000.") == "PKR 250,000"
+    assert extract_budget("Budget Rs 80,000.") == "Rs 80,000"
+    assert extract_budget("We have SEK 12000 for this.") == "SEK 12,000"
+    result = classify_rules(
+        {
+            "from_name": "Deniz",
+            "from_email": "deniz@kapi.example",
+            "subject": "Kapsam",
+            "body": "Sözleşme öncesi bir teklif istiyoruz. Aylık çalışma için bütçe 90000 TL.\n",
+        }
+    )
+    assert result.category == "lead"
+    assert result.budget == "TRY 90,000"
+
+
+def test_intent_is_not_the_subject_line():
+    result = classify_rules(
+        {
+            "from_name": "Jane Cole",
+            "from_email": "jane@acme.example",
+            "subject": "Looking for a Python partner",
+            "body": "We need a Python service to sync HubSpot and Slack. Budget is $8,000 a month.\n",
+        }
+    )
+    assert not result.intent.casefold().startswith("looking for a python partner")
+    assert "python" in result.intent.casefold()
+
+
+def test_approving_suspicious_mail_does_not_announce_a_reply(client):
+    row = next(item for item in client.get("/api/triage").json()["items"] if item["category"] == "suspicious")
+    approved = client.post(f"/api/triage/{row['id']}/approve")
+    assert approved.status_code == 200
+    alerts = client.get("/api/alerts").json()["alerts"]
+    assert not any(item["title"] == "Reply approved" and item["email_id"] == row["email_id"] for item in alerts)
