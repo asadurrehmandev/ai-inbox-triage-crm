@@ -165,7 +165,8 @@ def test_first_contact_calendar_needs_a_logged_second_confirm(client):
     assert "calendar invite" in logged[0]["reasons"]
 
 
-def test_unknown_domain_confirms_and_a_known_sender_does_not(client):
+def test_unknown_domain_confirms_and_a_known_sender_does_not(client, monkeypatch):
+    monkeypatch.setenv("TRUSTED_AUTHSERV_ID", "mx.lane.test")
     stranger = _park(
         {
             "id": "gate-link",

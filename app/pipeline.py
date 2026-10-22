@@ -162,6 +162,7 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
         "in_reply_to": row.get("in_reply_to") or "",
         "references": row.get("references_header") or row.get("references") or "",
         "headers": row.get("headers") or "",
+        "dkim_verified": row.get("dkim_verified") or "",
     }
     decision = evaluate_filing(
         email,

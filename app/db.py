@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS emails (
   message_id TEXT NOT NULL DEFAULT '',
   in_reply_to TEXT NOT NULL DEFAULT '',
   references_header TEXT NOT NULL DEFAULT '',
-  headers TEXT NOT NULL DEFAULT ''
+  headers TEXT NOT NULL DEFAULT '',
+  dkim_verified TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS triage (
@@ -172,6 +173,7 @@ def init_db() -> None:
             ("in_reply_to", "TEXT NOT NULL DEFAULT ''"),
             ("references_header", "TEXT NOT NULL DEFAULT ''"),
             ("headers", "TEXT NOT NULL DEFAULT ''"),
+            ("dkim_verified", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in _columns(conn, "emails"):
                 conn.execute(f"ALTER TABLE emails ADD COLUMN {column} {ddl}")
@@ -211,13 +213,17 @@ def insert_email(email: dict) -> None:
         in_reply_to = " ".join(str(item) for item in in_reply_to)
     if isinstance(references, list):
         references = " ".join(str(item) for item in references)
+    # Only a local DKIM check may set this. A webhook payload cannot.
+    verified = ""
+    if email.get("dkim_verified_source") == "local":
+        verified = str(email.get("dkim_verified") or "")
     with _LOCK, connect() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO emails
             (id, from_name, from_email, subject, body, received_at, status,
-             message_id, in_reply_to, references_header, headers)
-            VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)
+             message_id, in_reply_to, references_header, headers, dkim_verified)
+            VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)
             """,
             (
                 email["id"],
@@ -230,6 +236,7 @@ def insert_email(email: dict) -> None:
                 str(in_reply_to or ""),
                 str(references or ""),
                 _header_blob(email),
+                verified,
             ),
         )
 
@@ -374,7 +381,8 @@ def get_triage(triage_id: int) -> dict | None:
         """
         SELECT t.*, e.subject, e.from_name AS mailbox_name, e.from_email,
                e.body, e.received_at, e.status AS email_status,
-               e.message_id, e.in_reply_to, e.references_header, e.headers
+               e.message_id, e.in_reply_to, e.references_header, e.headers,
+               e.dkim_verified
         FROM triage t
         JOIN emails e ON e.id = t.email_id
         WHERE t.id = ?

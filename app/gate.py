@@ -3,18 +3,22 @@
 Stored flags and the model's category are not enough. The message is read
 again. A suspicious row cannot become a lead. Money movement, including a
 store card, a claim code, or a change of where invoices are sent, is refused.
-Without a DKIM pass aligned to From, the sender is a first contact. A subject
-of "Re:" is not a thread. A first contact that carries a risk feature needs a
-second confirm, and that confirm is logged.
+A sender is authenticated only from a trusted receiving server, or from a
+DKIM signature checked on the raw message. With no trusted authserv-id, every
+sender is a first contact. A subject of "Re:" is not a thread. A first contact
+that carries a risk feature needs a second confirm, and that confirm is logged.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
+
+from app.dkim_verify import verified_dkim_domains
 
 from app.classifier import known_sender
 from app.normalize import open_channels
@@ -46,7 +50,10 @@ _FILE = re.compile(
     re.IGNORECASE,
 )
 _CALENDAR = re.compile(r"BEGIN:VCALENDAR|text/calendar|METHOD:REQUEST|\.ics\b", re.IGNORECASE)
-_VOICEMAIL = re.compile(r"\bvoice[\s-]?mails?\b", re.IGNORECASE)
+_VOICEMAIL = re.compile(
+    r"\bvoice[\s-]?mails?\b|\bvoice[\s-]?messages?\b|\bvoice[\s-]?msgs?\b",
+    re.IGNORECASE,
+)
 _ATTACHMENT_HEADER = re.compile(r"content-disposition:\s*attachment", re.IGNORECASE)
 _QR_WORD = re.compile(r"\bqr(?:\s*-?\s*codes?)?\b", re.IGNORECASE)
 _MEETING_STARTING = re.compile(
@@ -89,6 +96,11 @@ _AUTH_HEADERS = {
     "arc-authentication-results",
     "authentication-results-original",
 }
+# RFC 8601 authserv-id, after an optional ARC instance prefix (i=1;).
+_AUTHSERV_ID = re.compile(
+    r"^(?:i\s*=\s*\d+\s*;\s*)?([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
 
 
 class FilingBlocked(Exception):
@@ -167,29 +179,64 @@ def _header_pairs(email: dict) -> list[tuple[str, str]]:
     return pairs
 
 
+def trusted_authserv_ids() -> set[str]:
+    """Exact authserv-ids of the receiving mail provider. Empty trusts nobody."""
+    raw = os.environ.get("TRUSTED_AUTHSERV_ID", "")
+    return {part.strip().lower().strip(".") for part in raw.split(",") if part.strip()}
+
+
+def _authserv_id(blob: str) -> str:
+    match = _AUTHSERV_ID.match((blob or "").strip())
+    return match.group(1).lower().strip(".") if match else ""
+
+
 def _auth_blobs(email: dict) -> list[str]:
+    """Auth headers in stored order. The first item is the topmost header."""
     return [value for name, value in _header_pairs(email) if name in _AUTH_HEADERS]
 
 
+def trusted_auth_blob(email: dict) -> str:
+    """The topmost Authentication-Results whose authserv-id is configured.
+
+    Later copies are ignored, including a second header that repeats the
+    trusted id. A lookalike such as mx.lane.test.attacker.com does not match
+    mx.lane.test. With TRUSTED_AUTHSERV_ID unset, this is empty.
+    """
+    allowed = trusted_authserv_ids()
+    if not allowed:
+        return ""
+    for blob in _auth_blobs(email):
+        if _authserv_id(blob) in allowed:
+            return blob
+    return ""
+
+
+def _stored_dkim(email: dict) -> str:
+    value = email.get("dkim_verified")
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 def authentication(email: dict) -> dict:
-    """DKIM, SPF, and DMARC as the mailbox reported them. Only aligned DKIM is trusted."""
-    blobs = "\n".join(_auth_blobs(email))
-    spf_blobs = [blobs]
-    spf_blobs.extend(value for name, value in _header_pairs(email) if name == "received-spf")
+    """DKIM, SPF, and DMARC from the one trusted auth result. Only aligned DKIM counts."""
+    blob = trusted_auth_blob(email)
+    spf_blobs = [blob] if blob else []
+    if blob:
+        spf_blobs.extend(value for name, value in _header_pairs(email) if name == "received-spf")
     spf_text = "\n".join(spf_blobs)
-    dkim = "pass" if _DKIM_PASS.search(blobs) else "none"
-    spf = _SPF.search(spf_text)
+    dkim = "pass" if blob and _DKIM_PASS.search(blob) else "none"
+    spf = _SPF.search(spf_text) if spf_text else None
     if spf is None:
+        spf_value = "none"
         for value in spf_blobs[1:]:
             leading = re.match(r"\s*(pass|fail|softfail|neutral|none)\b", value, re.IGNORECASE)
             if leading:
                 spf_value = leading.group(1).lower()
                 break
-        else:
-            spf_value = "none"
     else:
         spf_value = spf.group(1).lower()
-    dmarc = _DMARC.search(blobs)
+    dmarc = _DMARC.search(blob) if blob else None
     return {
         "dkim": dkim,
         "spf": spf_value,
@@ -199,16 +246,19 @@ def authentication(email: dict) -> dict:
 
 
 def dkim_domains(email: dict) -> list[str]:
+    """Signing domains from the single trusted auth result, and no other header."""
+    blob = trusted_auth_blob(email)
     found: list[str] = []
-    for blob in _auth_blobs(email):
-        for match in _DKIM_PASS.finditer(blob):
-            rest = match.group(1) or ""
-            domain = _HEADER_D.search(rest) or _HEADER_I.search(rest)
-            if domain is None:
-                continue
-            host = _domain_of(domain.group(1))
-            if host and host not in found:
-                found.append(host)
+    if not blob:
+        return found
+    for match in _DKIM_PASS.finditer(blob):
+        rest = match.group(1) or ""
+        domain = _HEADER_D.search(rest) or _HEADER_I.search(rest)
+        if domain is None:
+            continue
+        host = _domain_of(domain.group(1))
+        if host and host not in found:
+            found.append(host)
     return found
 
 
@@ -219,12 +269,42 @@ def _sender_domain(email: dict) -> str:
     return _domain_of(address.rsplit("@", 1)[1])
 
 
+def _raw_message(email: dict) -> bytes:
+    raw = email.get("raw_message")
+    if isinstance(raw, bytes) and raw:
+        return raw
+    if isinstance(raw, str) and raw:
+        return raw.encode()
+    return b""
+
+
+def _domains_align(domains: list[str], sender: str) -> bool:
+    return any(_aligned(domain, sender) for domain in domains)
+
+
 def sender_authenticated(email: dict) -> bool:
-    """True only for dkim=pass whose signing domain aligns with From."""
+    """Aligned DKIM from a checked signature, or from the trusted authserv-id.
+
+    A raw message is checked with dkimpy when that library is installed. A
+    failed check is stored as dkim_verified=none and the sender's
+    Authentication-Results header is then ignored. A webhook has no raw
+    message, so it can only authenticate through TRUSTED_AUTHSERV_ID, which
+    is empty by default.
+    """
     sender = _sender_domain(email)
     if not sender:
         return False
-    return any(_aligned(domain, sender) for domain in dkim_domains(email))
+    stored = _stored_dkim(email)
+    if stored == "none":
+        return False
+    if stored:
+        return _domains_align([part.strip() for part in stored.split(",") if part.strip()], sender)
+    raw = _raw_message(email)
+    if raw:
+        checked = verified_dkim_domains(raw)
+        if checked is not None:
+            return _domains_align(checked, sender)
+    return _domains_align(dkim_domains(email), sender)
 
 
 def _message_ids(value: str) -> list[str]:

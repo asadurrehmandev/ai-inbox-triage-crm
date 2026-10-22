@@ -139,30 +139,51 @@ _PAYMENT_INVARIANT = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-# A change of the mailbox that receives invoices, receipts, or payments.
-# An added CC ("also cc our AP") is not this pattern.
-_INVOICE_DESTINATION = re.compile(
-    r"(?:"
-    r"\b(?:send|email|forward|direct|route|deliver)\b.{0,60}\b(?:invoices?|receipts?|payments?)\b.{0,40}\bto\b[^.\n]{0,80}(?:@|\binstead\b)"
-    r"|"
-    r"\b(?:invoices?|receipts?|payments?)\b.{0,40}\bto\b[^.\n]{0,80}\binstead\b"
-    r"|"
-    r"\b(?:new|updated|replacement)\s+billing\s+emails?\b"
-    r"|"
-    r"\bbilling\s+emails?\s+is\b"
-    r"|"
-    r"\b(?:update|change|switch)\b.{0,30}\b(?:ap|accounts\s+payable)\s+contacts?\b"
-    r"|"
-    r"\b[\w.+-]+@[\w.-]+[^.\n]{0,48}\b(?:invoice|receipt|payment)\s+delivery\b"
-    r")",
+# Where payable documents go. The shape is a routing verb, a document, and a
+# destination (an address, "instead", or a replaced mailbox). It is not a list
+# of sentences. An added CC is removed before this runs.
+_PAYABLE_DOC = (
+    r"(?:invoices?|receipts?|payments?|statements?|bills?|remittances?|"
+    r"disbursements?|payouts?|(?:supplier|vendor)\s+bills?|"
+    r"(?:ap|a/p|accounts[\s-]+payable)\s+correspondence)"
+)
+_ROUTE_VERB = r"(?:send|e-?mail|forward|direct|route|deliver|remit|redirect|mail|re-?route)"
+_DEST_MARK = (
+    r"(?:[\w.+-]+@[\w.-]+|"
+    r"\binstead\b|"
+    r"\b(?:new|updated|different|replacement|revised)\s+(?:e-?mail|address|inbox|mailbox)\b)"
+)
+_DESTINATION_ROUTE = re.compile(
+    rf"\b{_ROUTE_VERB}\b.{{0,80}}\b{_PAYABLE_DOC}\b.{{0,50}}\b(?:to|at)\b[^.\n]{{0,80}}?{_DEST_MARK}"
+    rf"|\b{_PAYABLE_DOC}\b.{{0,40}}\b(?:to|at)\b[^.\n]{{0,80}}?{_DEST_MARK}",
+    re.IGNORECASE | re.DOTALL,
+)
+_BILLING_MAILBOX = re.compile(
+    r"\b(?:new|updated|replacement|revised)\s+(?:billing|remittance|payment|invoice)\s+e-?mails?\b"
+    r"|\b(?:billing|remittance|payment|invoice)\s+e-?mails?\s+is\b"
+    r"|\b(?:update|change|switch)\b.{0,30}\b(?:ap|a/p|accounts[\s-]+payable)\s+contacts?\b"
+    r"|\b[\w.+-]+@[\w.-]+[^.\n]{0,48}\b(?:invoice|receipt|payment|statement|bill)\s+delivery\b",
+    re.IGNORECASE | re.DOTALL,
+)
+# "cc our AP" / "cc ap@…" is an added copy, not a new destination.
+_ADDITIVE_CC = re.compile(
+    r"\bcc\b.{0,80}\b(?:ap@[\w.-]*|ap\b|a/p\b|accounts[\s-]+payable)\b",
     re.IGNORECASE | re.DOTALL,
 )
 _PAYEE_SHIFT = re.compile(
     r"\b(?:new|updated|update|change|changed|different|instead|revised|replacement)\b"
-    r".{0,50}\b(?:bank\s+accounts?|accounts?(?!\s+(?:manager|executive|team|director|owner|rep))|payees?|beneficiar(?:y|ies)|routing|banks?|wallets?)\b"
+    r".{0,50}\b(?:bank\s+accounts?|"
+    r"accounts?(?!\s+(?:manager|executive|team|director|owner|rep|payable|plan|plans))|"
+    r"payees?|beneficiar(?:y|ies)|routing|banks?|wallets?)\b"
     r"|"
     r"\b(?:payees?|wallets?|beneficiar(?:y|ies))\b.{0,40}\b(?:instead|updated|changed)\b",
     re.IGNORECASE | re.DOTALL,
+)
+_NEW_PAYABLE_ACCOUNT = re.compile(
+    r"\b(?:pay(?:able)?\s+to|banking\s+details|account\s+number|"
+    r"new\s+(?:payee|details)|"
+    r"new\s+(?:bank\s+)?accounts?(?!\s+(?:manager|executive|team|director|owner|rep|plan|plans|payable)))\b",
+    re.IGNORECASE,
 )
 
 
@@ -389,29 +410,52 @@ def _untrusted_challenge(text: str, sender: str) -> bool:
     return True
 
 
+def _strip_additive_cc(text: str) -> str:
+    """Drop an added AP copy so it is not read as the new payee."""
+    return _ADDITIVE_CC.sub(" ", text or "")
+
+
+def _destination_change(text: str) -> bool:
+    """A request to change where money or payable documents are sent.
+
+    The request routes a payable document (invoice, receipt, payment,
+    statement, bill, remittance, disbursement, payout, or AP correspondence)
+    to an address, or it replaces the billing mailbox. Asking to also CC
+    accounts payable is not this request.
+    """
+    stripped = _strip_additive_cc(text or "")
+    return bool(_DESTINATION_ROUTE.search(stripped) or _BILLING_MAILBOX.search(stripped))
+
+
 def payment_related(text: str) -> bool:
     """True when the text is about moving money or changing where it goes.
 
     Wallets, crypto, payees, beneficiaries, account and routing numbers, cards,
-    gift cards, store cards, claim codes, and invoices that name a new pay-to
-    all match. So does a change of where invoices, receipts, or payments are
-    sent: "send invoices to X instead", "our new billing email is", "update
-    the AP contact to". Asking to also CC accounts payable does not. A product
+    gift cards, store cards, claim codes, and a new pay-to all match. So does
+    any request to send invoices, receipts, payments, statements, or bills to
+    a different address. Asking to also CC accounts payable does not, even
+    when the note also mentions invoices or a new account manager. A product
     description that only says IBAN or SWIFT does not. Naming an app store
-    without a card or a code does not match.
+    without a card or a code does not match. A payout preference that names
+    no rail, payee, or account does not match.
     """
     folded = fold(text or "")
-    if _INVOICE_DESTINATION.search(folded):
+    if _destination_change(folded):
         return True
     if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(folded):
         return True
-    if re.search(r"\binvoices?\b", folded, re.IGNORECASE) and re.search(
-        r"\b(pay(?:able)?\s+to|new\s+(?:account|payee|details)|banking\s+details|account\s+number)\b",
+    if re.search(
+        r"\b(?:invoices?|receipts?|payments?|statements?|bills?)\b",
         folded,
         re.IGNORECASE,
-    ):
+    ) and _NEW_PAYABLE_ACCOUNT.search(folded):
         return True
-    return bool(_payment_change(folded) or _WIRE_REQUEST.search(folded) or _RAIL_CHANGE.search(folded) or _GIFT.search(folded))
+    return bool(
+        _payment_change(folded)
+        or _WIRE_REQUEST.search(folded)
+        or _RAIL_CHANGE.search(folded)
+        or _GIFT.search(folded)
+    )
 
 
 def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict] | None = None) -> list[str]:

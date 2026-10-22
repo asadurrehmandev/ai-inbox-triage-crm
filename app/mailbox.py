@@ -12,6 +12,7 @@ import re
 from datetime import timezone
 from email.header import decode_header
 
+from app.dkim_verify import verified_dkim_domains
 from app.prepare import html_to_text
 
 logger = logging.getLogger("lane.mailbox")
@@ -96,7 +97,7 @@ def parse_message(raw: bytes, uid: str, uidvalidity: str) -> dict:
         headers["ARC-Authentication-Results"] = arc if len(arc) > 1 else arc[0]
     if received_spf:
         headers["Received-SPF"] = received_spf if len(received_spf) > 1 else received_spf[0]
-    return {
+    message = {
         "id": message_id,
         "message_id": message_id,
         "from_name": sender[0],
@@ -111,6 +112,13 @@ def parse_message(raw: bytes, uid: str, uidvalidity: str) -> dict:
         "imap_uid": uid,
         "status": "new",
     }
+    checked = verified_dkim_domains(raw)
+    if checked is not None:
+        # "none" means the raw message was checked and no signature passed.
+        # The sender's Authentication-Results header is then ignored.
+        message["dkim_verified"] = ",".join(checked) if checked else "none"
+        message["dkim_verified_source"] = "local"
+    return message
 
 
 def _uidvalidity(client, folder: str) -> str:
