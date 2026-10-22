@@ -7,7 +7,7 @@ name = "lane-inbox-triage"
 version = "1.0.0"
 description = "AI inbox triage to CRM. Python worker, Claude when a key is present, and a no-key rule engine for the demo."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn>=0.32",
@@ -16,9 +16,9 @@ dependencies = [
   "apscheduler>=3.10",
   "python-dotenv>=1.0",
   "dkimpy>=1.1.8",
-  "numpy>=1.26",
-  "onnxruntime>=1.19",
-  "tokenizers>=0.20",
+  "numpy>=2.2.6",
+  "torch>=2.6",
+  "transformers>=4.57",
 ]
 
 [project.optional-dependencies]

@@ -37,7 +37,7 @@ _LEX = {
         r"退订|配信停止|uitschrijven|abonelikten",
     ),
     "urgent": (
-        r"\b(?:outage|sev-?1|\bp0\b|production is down|is down|went down|fora do ar)\b",
+        r"\b(?:outage|sev-?1|\bp0\b|production is down|is down|went down)\b",
         r"ca[ií]da|en panne|ausgefallen",
         r"宕机|落ちて|障害",
     ),

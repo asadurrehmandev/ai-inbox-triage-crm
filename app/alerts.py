@@ -13,12 +13,16 @@ def escape_mrkdwn(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _clause(value: str) -> str:
+    return value.strip().rstrip(".")
+
+
 def lead_summary(record: dict) -> str:
     """Who the lead is and what they want. Not the draft reply."""
     name = str(record.get("name") or record.get("from_name") or "Unknown sender")
     company = str(record.get("company") or "no company")
     budget = str(record.get("budget") or "no budget")
-    intent = str(record.get("intent") or "no intent yet")
+    intent = _clause(str(record.get("intent") or "no intent yet"))
     return f"{name} at {company}. {budget}. {intent}."
 
 
@@ -26,7 +30,7 @@ def render_alert(category: str, record: dict) -> tuple[str, str]:
     name = str(record.get("name") or record.get("from_name") or "Unknown sender")
     company = str(record.get("company") or "no company on file")
     budget = str(record.get("budget") or "no amount stated")
-    intent = str(record.get("intent") or "review the message")
+    intent = _clause(str(record.get("intent") or "review the message"))
     subject = str(record.get("subject") or record.get("source_subject") or "")
     if category == "lead":
         title = "Qualified lead"

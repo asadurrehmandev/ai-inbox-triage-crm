@@ -1,9 +1,10 @@
-"""Label, urgency, and money heads on top of the multilingual embedding.
+"""Label, urgency, and ask heads on the fine-tuned multilingual embedding.
 
-The heads are a softmax and three sigmoids trained on ``app.corpus``, which is
-synthetic and is not an evaluation mailbox. Weights live in
-``app/model_weights.json``. A missing file leaves the heads silent so the
-structural rules still run.
+The upper encoder layers are a SetFit-style fine-tune stored beside the
+pinned base model. The linear heads are trained on ``app.corpus``, split by
+scenario group. ``data/hand_heldout.json`` is not part of that training.
+Weights live in ``app/model_weights.json``. A missing file leaves the heads
+silent so the structural rules still run.
 """
 
 from __future__ import annotations
@@ -70,20 +71,25 @@ def assess(text: str) -> dict:
     normal = sum(lifted) or 1.0
     probs = [item / normal for item in lifted]
     best = max(range(len(probs)), key=probs.__getitem__)
-    urgency = loaded["urgency"]
-    money = loaded["money"]
-    if money.get("weights"):
-        money_sim = _sigmoid(_dot(vector, money["weights"], money["bias"]))
-    else:
-        centroid = np.asarray(money["centroid"], dtype=np.float32)
-        money_sim = float(np.dot(vector, centroid))
+    urgency = loaded.get("urgency") or {}
+    urgent_block = urgency.get("urgent") or urgency.get("outage") or {"weights": [], "bias": 0.0}
+    negated_block = urgency.get("negated") or {"weights": [], "bias": 0.0}
+    ask = loaded.get("ask") or {}
+    money = ask.get("money") or loaded.get("money") or {}
+
+    def _head(block: dict) -> float:
+        if not block.get("weights"):
+            return 0.0
+        return _sigmoid(_dot(vector, block["weights"], block.get("bias", 0.0)))
+
     return {
         "label": LABELS[best],
         "label_p": probs[best],
-        "outage": _sigmoid(_dot(vector, urgency["outage"]["weights"], urgency["outage"]["bias"])),
-        "explicit": _sigmoid(_dot(vector, urgency["explicit"]["weights"], urgency["explicit"]["bias"])),
-        "negated": _sigmoid(_dot(vector, urgency["negated"]["weights"], urgency["negated"]["bias"])),
-        "money_sim": money_sim,
+        "urgent": _head(urgent_block),
+        "negated": _head(negated_block),
+        "money_sim": _head(money),
+        "bank_sim": _head(ask.get("bank") or {}),
+        "credential_sim": _head(ask.get("credential") or {}),
     }
 
 
@@ -96,6 +102,24 @@ def risk_probability(features: dict[str, float]) -> float:
     for key, weight in block["weights"].items():
         total += float(weight) * float(features.get(key, 0.0))
     return _sigmoid(total)
+
+
+def urgency_threshold() -> float:
+    loaded = _weights()
+    urgent = ((loaded.get("urgency") or {}).get("urgent") or {}) if loaded else {}
+    return float(urgent.get("threshold", 1.0))
+
+
+def negation_threshold() -> float:
+    loaded = _weights()
+    negated = ((loaded.get("urgency") or {}).get("negated") or {}) if loaded else {}
+    return float(negated.get("threshold", 1.0))
+
+
+def ask_threshold() -> float:
+    loaded = _weights()
+    ask = (loaded.get("ask") or {}) if loaded else {}
+    return float(ask.get("threshold", 1.0))
 
 
 def money_threshold() -> float:

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from app.heads import money_threshold, risk_probability, risk_threshold
+from app.heads import ask_threshold, money_threshold, risk_probability, risk_threshold
 from app.normalize import fold
 from app.risk import (
     _BRANDS,
@@ -238,23 +238,43 @@ def features(email: dict, text: str, contacts: list[dict] | None, money_sim: flo
     }
 
 
-def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, money_sim: float = 0.0) -> bool:
-    """Money movement plus a risky sender or a mismatched link is suspicious.
+def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, signals: dict | float | None = None) -> bool:
+    """An ask to move money, change a bank, or give credentials, plus a structural risk.
 
-    The logistic score can also fire. A plain invoice on the sender's own
-    domain, including one that prints the account it is already paid to, does
-    not.
+    The ask may come from the learned head, so it is not an English word list.
+    A plain invoice on the sender's own domain, including a footer that only
+    prints the account it is already paid to, is not suspicious.
     """
+    if isinstance(signals, dict):
+        money_sim = float(signals.get("money_sim") or 0.0)
+        bank_sim = float(signals.get("bank_sim") or 0.0)
+        credential_sim = float(signals.get("credential_sim") or 0.0)
+    else:
+        money_sim = float(signals or 0.0)
+        bank_sim = 0.0
+        credential_sim = 0.0
     row = features(email, text, contacts, money_sim)
-    risky_sender = bool(
+    reply = str(email.get("reply_to") or email.get("reply-to") or "")
+    reply_domain = _domain(reply) if "@" in reply else ""
+    sender_domain = _domain(email.get("from_email") or "")
+    reply_mismatch = bool(reply_domain and sender_domain and reply_domain != sender_domain)
+    structural = bool(
         row["free_mail"]
         or row["lookalike"]
         or row["link_mismatch"]
         or row["shortener"]
         or row["claims_org"]
-        or not row["aligned"]
+        or reply_mismatch
     )
-    if row["money"] >= 1.0 and risky_sender:
+    if row["aligned"] and not structural:
+        return False
+    ask = bool(
+        row["money"] >= 1.0
+        or money_sim >= ask_threshold()
+        or bank_sim >= ask_threshold()
+        or credential_sim >= ask_threshold()
+    )
+    if ask and structural:
         return True
     if row["money"] >= 1.0 and risk_probability(row) >= risk_threshold():
         return True

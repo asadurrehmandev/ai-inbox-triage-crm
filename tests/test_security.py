@@ -42,10 +42,10 @@ def test_urgent_needs_a_known_sender_or_a_thread():
         result = classify_rules(_mail(email_id))
         assert result.category == "urgent", email_id
         assert "unverified sender" in result.reasons
-    # A same-day deadline with no outage still waits for a known sender or a thread.
+    # A same-day deadline with a consequence is urgent, including from a first contact.
     deadline = classify_rules(_mail("q27"))
-    assert deadline.category != "urgent"
-    assert deadline.suggested_category == "urgent"
+    assert deadline.category == "urgent"
+    assert "unverified sender" in deadline.reasons
     hidden = classify_rules(_mail("q19"))
     assert "instruction_suppression" in hidden.risk_flags
     assert hidden.category == "urgent"

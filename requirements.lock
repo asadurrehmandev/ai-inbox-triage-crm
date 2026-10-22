@@ -25,6 +25,13 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 tzlocal==5.4.4
 uvicorn==0.54.0
-numpy==1.26.4
-onnxruntime==1.31.0
-tokenizers==0.23.3
+numpy==2.2.6
+torch==2.14.1
+transformers==4.57.1
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+safetensors==0.8.0
+regex==2026.9.29
+filelock==4.2.4
+pyyaml==6.0.1
+tqdm==4.70.1

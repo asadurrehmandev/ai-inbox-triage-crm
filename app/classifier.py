@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.budget import extract_budget
-from app.heads import assess
+from app.heads import assess, negation_threshold, urgency_threshold
 from app.prepare import head_and_tail, hidden_text, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
 from app.rank import settle
 from app.risk import assess_risk, free_mail, hard_flags, known_contact_lookalike, payment_related
@@ -99,24 +99,17 @@ _OOO = re.compile(
 )
 _OUTAGE = re.compile(
     r"\b(?:production is down|went down|is down|are down|outage|site down|sev-?1|p0|"
-    r"offline|not responding|"
-    r"can(?:not|'t) take bookings|unable to take bookings|"
-    r"fora do ar|ca[ií]d[oa]|en panne|ausgefallen|hors service)\b"
-    r"|宕机|障害が発生|サイトが(?:ダウン|落ち)",
+    r"offline|not responding)\b",
     re.IGNORECASE,
 )
 _SERVICE = (
-    r"system|systems|site|website|platform|checkout|booking|bookings|orders?|"
-    r"shop|portal|service|servicio|sistema|pedidos|caisse|kassa|服务器|系统|サイト"
+    r"system|systems|site|website|platform|orders?|shop|portal|service"
 )
 _DOWN_WORD = (
-    r"offline|not working|isn'?t working|does(?:n'?t| not) work|stopped working|"
-    r"no funciona|n[aã]o funciona|ne fonctionne pas|funktioniert nicht|"
-    r"hors service|ca[ií]d[oa]|ausgefallen|fora do ar|en panne|çalışmıyor|calismiyor"
+    r"offline|not working|isn'?t working|does(?:n'?t| not) work|stopped working"
 )
 _NOT_URGENT = re.compile(
-    r"\b(?:not urgent|no rush|no hurry|low priority|whenever you (?:can|have)|"
-    r"when you have time|pas urgent|no es urgente|nicht dringend|acil de[gğ]il)\b",
+    r"\b(?:not urgent|no rush|no hurry|low priority)\b",
     re.IGNORECASE,
 )
 _INVOICE_EVIDENCE = re.compile(
@@ -155,7 +148,7 @@ _SUPPORTISH = re.compile(
     r"\b(?:not working|isn'?t working|does(?:n'?t| not) work|is broken|broken|bug|"
     r"can(?:not|'t) log ?in|cannot log ?in|password|login loop|feature request|"
     r"how do i|could you (?:add|fix|check)|stopped syncing|is not pushing|"
-    r"no funciona|ne fonctionne pas|funktioniert nicht|çalışmıyor)\b",
+    r"no funciona|ne fonctionne pas|funktioniert nicht)\b",
     re.IGNORECASE,
 )
 _RENEWAL = re.compile(
@@ -231,6 +224,41 @@ def _plain(email: dict) -> str:
     return head_and_tail(f"{email.get('subject', '')}\n{body}")
 
 
+def message_urgent(full_text: str, body: str) -> float:
+    """Urgency of the whole note, or of one real sentence inside it.
+
+    A greeting and a signature pull the pooled vector off a one-line outage.
+    Scoring the body sentences as well keeps that line. Fragments under 40
+    characters are skipped so a short calm clause cannot trip the head.
+    A leading name is tried both ways, because "Asad," is not the request.
+    """
+    def _take(text: str, best: float) -> float:
+        verdict = assess(text)
+        # "Not urgent" is a property of the span. "None of the notices left" is not.
+        if (verdict.get("negated") or 0) >= negation_threshold():
+            return best
+        return max(best, float(verdict.get("urgent") or 0))
+
+    best = _take(full_text or "", 0.0)
+    for sentence in _body_sentences(body or ""):
+        if len(sentence) < 40:
+            continue
+        best = _take(sentence, best)
+        stripped = re.sub(r"^[A-Za-z][\w.'’-]{1,24},\s+", "", sentence)
+        if stripped != sentence and len(stripped) >= 40:
+            best = _take(stripped, best)
+    return best
+
+
+def _body_can_be_urgent(email: dict) -> bool:
+    """Urgency needs real prose in the body. A subject line or a calendar blob is not enough."""
+    raw = email.get("body") or ""
+    if re.search(r"BEGIN:VCALENDAR|text/calendar|METHOD:REQUEST", raw, re.IGNORECASE):
+        return False
+    prose = strip_quotes(strip_injection_notes(html_to_text(raw)))
+    return len(re.sub(r"[^\w]", "", prose, flags=re.UNICODE)) >= 12
+
+
 def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[str, float], list[str]]:
     scores = {name: 0.0 for name in ("lead", "support", "invoice", "spam", "urgent", "recruiter")}
     reasons: list[str] = []
@@ -269,43 +297,6 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         scores["invoice"] += 6
         scores["lead"] -= 5
 
-    outage = is_outage(lowered)
-    impact = re.search(r"\b(every|all|nobody|customers?|patients?|orders|shoppers?)\b", lowered)
-    harm = re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered)
-    http_error = re.search(r"\b5\d\d\b", lowered)
-    if outage:
-        scores["urgent"] += 6
-        note("a service is down")
-    if http_error and impact and harm:
-        scores["urgent"] += 6
-    if re.search(r"\b(losing (?:orders|money|customers|patients))\b", lowered):
-        scores["urgent"] += 4
-    if re.search(
-        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|by \d{1,2}\s?(?:am|pm) today|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
-        lowered,
-    ):
-        scores["urgent"] += 5
-        note("a deadline is named")
-    if re.search(r"\b(sev-?1|p0)\b", lowered):
-        scores["urgent"] += 6
-    immediacy = re.search(
-        r"\b(right now|asap|immediately|caída|urgente|urgence)\b",
-        lowered,
-    )
-    impact = re.search(
-        r"\b(for everyone|everyone|every|nothing is shipping|blank (?:white )?page|errors on every|customers|orders|patients)\b",
-        lowered,
-    )
-    broken = re.search(r"\b(down|broken|stopped|error|errors|failing|switch it off)\b", lowered)
-    if re.search(r"\bnothing is shipping\b", lowered) or (
-        re.search(r"\bblank (?:white )?page\b", lowered) and impact
-    ):
-        scores["urgent"] += 6
-    if immediacy and (impact or broken):
-        scores["urgent"] += 6
-    if re.search(r"\b(caída|urgente)\b", lowered) and re.search(r"\b(caída|pedido|pedidos|web|página|pagina)\b", lowered):
-        scores["urgent"] += 4
-
     if re.search(r"\b(proposal|pricing|rfp|retainer|freelancer|sow|demo|spend|could you quote|a quote)\b", lowered):
         scores["lead"] += 4
         note("asks for a proposal, quote, or retainer")
@@ -333,7 +324,7 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
         scores["support"] += 4
         note("a defect is described")
-    if re.search(r"\berror\s?\d{3}\b", lowered) and not (http_error and impact and harm):
+    if re.search(r"\berror\s?\d{3}\b", lowered):
         scores["support"] += 4
     if re.search(r"\b(password reset|account locked|can't log ?in|cannot log ?in|won't download|blank screen)\b", lowered):
         scores["support"] += 4
@@ -361,10 +352,6 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         else:
             scores["spam"] = max(scores["spam"], 5)
             note("an expiry notice")
-    if _NOT_URGENT.search(lowered) or (_SUPPORTISH.search(lowered) and not is_outage(lowered)):
-        scores["urgent"] = 0
-        if _NOT_URGENT.search(lowered):
-            note("the sender says it is not urgent")
     if scores["invoice"] > 0 and not _invoice_evidence(lowered) and scores["recruiter"] < 4:
         # A budget or a contract is not an invoice. Receipts and renewals already counted.
         if "a payment receipt" not in reasons and "a renewal" not in reasons:
@@ -391,15 +378,22 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     # The embedding head fills a gap. A clear rule score is left alone.
     guessed = None
     signals = signals or {}
-    if signals.get("negated", 0) >= 0.55 and not is_outage(lowered) and signals.get("outage", 0) < 0.7:
+    # Urgency is the learned head: an outage, a security or legal incident, or a
+    # same-day deadline with a consequence. Rules do not add urgent points.
+    # A picture with no words, or a calendar invite, is not an outage note.
+    # The subject alone must not carry the urgent score.
+    if signals.get("negated", 0) >= negation_threshold():
         scores["urgent"] = 0
-        if signals.get("label") == "support" and not _NEWSLETTER.search(lowered):
-            scores["spam"] = min(scores["spam"], 1.0)
-            scores["support"] = max(scores["support"], 5.0)
         note("the sender says it is not urgent")
-    if signals.get("outage", 0) >= 0.66 and signals.get("negated", 0) < 0.55 and scores["urgent"] < 4:
+    elif (
+        _body_can_be_urgent(email)
+        and signals.get("urgent", 0) >= urgency_threshold()
+        and not _NEWSLETTER.search(lowered)
+        and scores["spam"] < 5
+        and scores["recruiter"] < 4
+    ):
         scores["urgent"] = max(scores["urgent"], 6.0)
-        note("customer impact")
+        note("customer impact, a security incident, or a same-day deadline")
     if max(scores.values()) < 4:
         guessed = signals.get("label")
         if (signals.get("label_p") or 0) < 0.45:
@@ -740,7 +734,9 @@ def _body_sentences(body: str) -> list[str]:
     kept: list[str] = []
     for line in (body or "").splitlines():
         line = line.strip()
-        if not line or _GREETING.match(line) or _CLOSINGS.match(line) or _HEADER_LINE.match(line):
+        if _CLOSINGS.match(line):
+            break
+        if not line or _GREETING.match(line) or _HEADER_LINE.match(line):
             continue
         if line.endswith(",") and len(line.split()) <= 4:
             continue
@@ -766,6 +762,35 @@ def _company_from_domain(email: dict) -> str | None:
     return letters[:1].upper() + letters[1:]
 
 
+def _intent_score(sentence: str) -> int:
+    """Prefer the sentence that says the service, the scope, or the timing."""
+    low = sentence.casefold()
+    score = 0
+    for token, weight in (
+        ("quote", 5),
+        ("devis", 5),
+        ("proposal", 4),
+        ("retainer", 3),
+        ("budget", 2),
+        ("service", 3),
+        ("broken", 4),
+        ("form", 3),
+        ("past due", 5),
+        ("overdue", 4),
+        ("invoice", 2),
+        ("down", 3),
+        ("error", 2),
+        ("today", 1),
+        ("tomorrow", 1),
+        ("deadline", 2),
+    ):
+        if token in low:
+            score += weight
+    if 24 <= len(sentence) <= 180:
+        score += 1
+    return score
+
+
 def extract_intent(
     category: str,
     text: str,
@@ -774,60 +799,44 @@ def extract_intent(
     name: str | None = None,
     company: str | None = None,
 ) -> str:
-    """A short template from the fields. No subject prefix and no body dump."""
-    who = (company or "").strip()
-    if not who and name and len(name.split()) >= 2:
-        who = name.strip()
-    if not who or len(who.split()) < 2 and not company:
-        who = who if company else "Sender"
-    if company:
-        who = company.strip()
-    low = text or ""
+    """One sentence about what the sender wants. Not a fixed template."""
+    del budget, name, company
+    subject_cf = re.sub(r"\s+", " ", (subject or "").strip()).casefold()
     if category == "suspicious":
-        what = "Suspicious. Do not pay or reply"
-    elif category == "recruiter":
-        what = "Recruiter outreach"
-    elif category == "spam":
-        what = "Newsletter or promotion"
-    elif category == "invoice":
-        number = re.search(r"\b(?:invoice|inv)[^\d]{0,12}(\d{3,})", low, re.IGNORECASE)
-        what = "Invoice"
-        if number:
-            what += f" {number.group(1)}"
-        if re.search(r"\bpast due\b|\boverdue\b", low, re.IGNORECASE):
-            what += ", past due"
-        elif re.search(r"\breceipt\b|\bpayment received\b", low, re.IGNORECASE):
-            what = "Receipt"
-    elif category in {"urgent", "support"}:
-        found = [
-            token
-            for token in ("broken", "form", "checkout", "booking", "login", "export", "error")
-            if re.search(rf"\b{token}\b", low, re.IGNORECASE)
-        ]
-        what = "Reports " + " ".join(found[:3]) if found else (
-            "Reports an outage" if category == "urgent" else "Asks for support"
-        )
-    else:
-        if re.search(r"\bquote\b", low, re.IGNORECASE):
-            what = "Wants a quote"
-        elif re.search(r"\b(proposal|retainer|sow|statement of work|contract)\b", low, re.IGNORECASE):
-            what = "Wants a proposal"
-        else:
-            what = "Wants help"
-        tools = [tool for tool in _ASK_TOOLS if re.search(rf"\b{re.escape(tool)}\b", low, re.IGNORECASE)]
-        if tools:
-            what += " for " + " ".join(tools[:3])
-    when = _TIMELINE.search(low)
-    parts = [f"{who}: {what}"]
-    if budget and budget.casefold() not in what.casefold():
-        parts.append(budget)
-    if when:
-        parts.append(when.group(0))
-    # The subject is not a field. It is never copied in.
-    del subject
-    line = "; ".join(part for part in parts if part)
+        return "Suspicious. Do not pay or reply."
+    ranked: list[tuple[int, str]] = []
+    for sentence in _body_sentences(text):
+        cleaned = re.sub(r"\s+", " ", sentence).strip()
+        if not cleaned or _GREETING.match(cleaned):
+            continue
+        if subject_cf and cleaned.casefold().startswith(subject_cf):
+            continue
+        ranked.append((_intent_score(cleaned), cleaned))
+    if not ranked:
+        return "Review the message"
+    ranked.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+    echoed = [
+        (_intent_score(cleaned), cleaned)
+        for sentence in _body_sentences(text)
+        if (cleaned := re.sub(r"\s+", " ", sentence).strip())
+        and subject_cf
+        and cleaned.casefold().startswith(subject_cf)
+    ]
+    line = ranked[0][1]
+    if echoed:
+        echoed.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+        if echoed[0][0] >= max(3, ranked[0][0] + 1):
+            line = echoed[0][1]
+    line = re.sub(
+        r"^(?:bonjour|hello|hi|dear|guten tag|hola|ol[aá]|salam)[,!\s]+",
+        "",
+        line,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
     if len(line) > 140:
-        line = line[:139].rstrip(" ,;:") + "…"
+        clipped = line[:139].rsplit(" ", 1)[0]
+        line = (clipped or line[:139]).rstrip(" ,;:") + "…"
     return line
 
 
@@ -995,9 +1004,7 @@ def has_operational_pressure(text: str) -> bool:
         return True
     if re.search(r"\b(losing (?:orders|money|customers|patients)|nothing is shipping)\b", lowered):
         return True
-    if re.search(r"\b(caída|urgente)\b", lowered) and re.search(r"\b(caída|pedido|pedidos|web|página|pagina)\b", lowered):
-        return True
-    immediacy = re.search(r"\b(right now|asap|immediately|caída|urgente|urgence)\b", lowered)
+    immediacy = re.search(r"\b(right now|asap|immediately)\b", lowered)
     impact = re.search(
         r"\b(for everyone|everyone|every|nothing is shipping|blank (?:white )?page|errors on every|customers|orders|patients)\b",
         lowered,
@@ -1014,26 +1021,18 @@ def urgent_allowed(
     known_contacts: list[dict] | None,
     outage_signal: bool = False,
 ) -> bool:
-    """A real outage is urgent from a stranger or from a known contact.
+    """Urgency follows the learned head, for a stranger or a known contact.
 
-    A deadline with no outage still needs a known sender or a thread. Payment
-    mail, a calendar invite, and an image with no readable body stay out.
-    ``outage_signal`` is the urgency head, so a paraphrase the keyword list
-    misses still counts.
+    A calendar invite stays out. ``outage_signal`` is accepted when a caller
+    already ran the head. A known sender is not required for a deadline.
     """
-    if (payment_related(text) or "payment_related" in (email.get("risk_flags") or [])) and not outage_signal:
+    del known_contacts
+    if not _body_can_be_urgent(email):
         return False
-    raw = email.get("body") or ""
-    if re.search(r"BEGIN:VCALENDAR|text/calendar|METHOD:REQUEST", raw, re.IGNORECASE):
-        return False
-    outage = outage_signal or is_outage(text)
-    if not has_operational_pressure(text) and not outage:
-        return False
-    if known_sender(email, known_contacts) or existing_thread(email):
+    if outage_signal:
         return True
-    if len(html_to_text(raw).strip()) < 40:
-        return False
-    return outage
+    body = strip_quotes(strip_injection_notes(html_to_text(email.get("body") or "")))
+    return message_urgent(text or "", body) >= urgency_threshold()
 
 
 def _neighbor_lookalike(email: dict, text: str, contacts: list[dict] | None) -> bool:
@@ -1061,80 +1060,82 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     raw = prepared.get("body") or ""
     full = _plain(prepared)
     text = strip_quotes(strip_injection_notes(full))
-    signals = assess(text)
+    body_for_urgent = strip_quotes(strip_injection_notes(html_to_text(raw)))
+    signals = dict(assess(text))
+    # The head is the urgency signal. A long signature must not bury the one line that matters.
+    signals["urgent"] = message_urgent(text, body_for_urgent)
+    if signals["urgent"] > 0:
+        # A negated full-text pool must not cancel a sentence the negation head accepts.
+        signals["negated"] = 0.0
     flags = assess_risk(prepared, full, raw, known_contacts)
     if "lookalike_domain" not in flags and _neighbor_lookalike(prepared, full, domain_contacts):
         flags.append("lookalike_domain")
     contacts = [*(known_contacts or []), *(domain_contacts or [])]
-    if decide_suspicious(prepared, full, contacts, signals.get("money_sim") or 0.0):
+    if decide_suspicious(prepared, full, contacts, signals):
         if "risk_score" not in flags:
             flags.append("risk_score")
     blocking = hard_flags(flags)
+    suspicious = bool(blocking)
     visible = dict(prepared)
     visible["body"] = strip_quotes(html_to_text(raw))
-    if blocking:
-        category, secondary = settle("suspicious", [], True)
-        return Classification(
-            category=category,
-            confidence=0.9,
-            name=extract_name(visible, known_contacts),
-            company=extract_company(visible, known_contacts),
-            budget=None,
-            intent="Suspicious. Do not pay or reply.",
-            draft_reply=draft_reply("suspicious", None, "", blocking),
-            model="rules",
-            risk_flags=flags,
-            secondary_categories=secondary,
-            forwarded_by=prepared.get("forwarded_by"),
-            contact_email=prepared.get("from_email"),
+    if suspicious:
+        category, secondary = "suspicious", []
+        confidence = 0.9
+        suggested = None
+        suggestion_confidence = None
+        reasons = []
+        name = extract_name(visible, known_contacts)
+        company = extract_company(visible, known_contacts)
+        budget = None
+        intent = "Suspicious. Do not pay or reply."
+        scores = None
+    else:
+        scores, reasons = _score(text, prepared, signals)
+        category, secondary, confidence, suggested, suggestion_confidence = _choose(scores)
+        name = extract_name(visible, known_contacts, accept_display=category not in {"spam", "suspicious"})
+        company = extract_company(visible, known_contacts)
+        if company is None and category not in {"spam", "suspicious"}:
+            company = _company_from_domain(visible)
+        auto = (prepared.get("auto_submitted") or "").lower()
+        if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
+            name = None
+            company = None
+        body_only = strip_quotes(strip_injection_notes(html_to_text(prepared.get("body") or "")))
+        budget = extract_budget(text)
+        if budget and (category == "recruiter" or _SALARY.search(text) or _RECRUITER.search(text)):
+            budget = None
+        if budget and category == "review" and "a price is written in the message" not in reasons:
+            reasons = [*reasons, "a price is written in the message"]
+        if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
+            budget = None
+        intent = extract_intent(category, body_only, prepared.get("subject") or "", budget, name, company)
+        concealed = hidden_text(raw)
+        readable = f"{prepared.get('subject') or ''}\n{text}\n{concealed}"
+        # Payment mail is not filed and is not urgent. The person verifies it by phone.
+        if payment_related(readable) and category in {"lead", "urgent"}:
+            suggested = suggested or category
+            if "payment-related: verify by phone" not in reasons:
+                reasons.append("payment-related: verify by phone")
+            if "payment_related" not in flags:
+                flags = [*flags, "payment_related"]
+            category = "review"
+            confidence = min(confidence, 0.45)
+        # The head is the urgency signal, including for a first contact.
+        head_urgent = (
+            _body_can_be_urgent(prepared)
+            and (signals.get("urgent") or 0) >= urgency_threshold()
+            and (signals.get("negated") or 0) < negation_threshold()
         )
-    scores, reasons = _score(text, prepared, signals)
-    category, secondary, confidence, suggested, suggestion_confidence = _choose(scores)
-    name = extract_name(visible, known_contacts, accept_display=category not in {"spam", "suspicious"})
-    company = extract_company(visible, known_contacts)
-    if company is None and category not in {"spam", "suspicious"}:
-        company = _company_from_domain(visible)
-    auto = (prepared.get("auto_submitted") or "").lower()
-    if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
-        name = None
-        company = None
-    body_only = strip_quotes(strip_injection_notes(html_to_text(prepared.get("body") or "")))
-    budget = extract_budget(text)
-    if budget and (category == "recruiter" or _SALARY.search(text) or _RECRUITER.search(text)):
-        budget = None
-    if budget and category == "review" and "a price is written in the message" not in reasons:
-        reasons = [*reasons, "a price is written in the message"]
-    if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
-        budget = None
-    intent = extract_intent(category, body_only, prepared.get("subject") or "", budget, name, company)
-    concealed = hidden_text(raw)
-    readable = f"{prepared.get('subject') or ''}\n{text}\n{concealed}"
-    # Payment mail is not filed and is not urgent. The person verifies it by phone.
-    if payment_related(readable) and category in {"lead", "urgent"}:
-        suggested = suggested or category
-        if "payment-related: verify by phone" not in reasons:
-            reasons.append("payment-related: verify by phone")
-        if "payment_related" not in flags:
-            flags = [*flags, "payment_related"]
-        category = "review"
-        confidence = min(confidence, 0.45)
-    # A first contact that only sounds urgent stays in review, including phishing-looking mail.
-    outage_signal = (signals.get("outage") or 0) >= 0.66 and (signals.get("negated") or 0) < 0.55
-    if category == "urgent" and not urgent_allowed(prepared, readable, known_contacts, outage_signal):
-        suggested = suggested or "urgent"
-        if "urgent needs a known sender or an existing thread" not in reasons:
-            reasons.append("urgent needs a known sender or an existing thread")
-        category = "review"
-        confidence = min(confidence, 0.45)
-    elif category == "urgent" and not known_sender(prepared, known_contacts) and not existing_thread(prepared):
-        if "unverified sender" not in reasons:
-            reasons.append("unverified sender")
-    if category != "suspicious" and (category == "invoice" or suggested == "invoice") and _OVERDUE.search(readable):
-        if "urgent" not in secondary:
+        if category == "urgent" and not known_sender(prepared, known_contacts) and not existing_thread(prepared):
+            if "unverified sender" not in reasons:
+                reasons.append("unverified sender")
+        overdue = bool(_OVERDUE.search(readable))
+        if category == "invoice" and (head_urgent or overdue) and "urgent" not in secondary:
             secondary = [*secondary, "urgent"]
-        if "overdue invoice" not in reasons:
-            reasons.append("overdue invoice")
-    category, secondary = settle(category, secondary, bool(blocking))
+            if overdue and "overdue invoice" not in reasons:
+                reasons.append("overdue invoice")
+    # Rank is last, after every secondary label, so a suspicious row cannot keep urgent.
+    category, secondary = settle(category, secondary, suspicious)
     return Classification(
         category=category,
         confidence=confidence,

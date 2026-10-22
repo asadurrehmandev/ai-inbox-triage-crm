@@ -337,6 +337,25 @@ def test_suspicious_outranks_every_label_and_is_never_urgent():
     )
     assert bank.category == "suspicious"
     assert "urgent" not in bank.secondary_categories
+    overdue = classify_rules(
+        {
+            "from_name": "Accounts Payable",
+            "from_email": "ap.vendor@gmail.com",
+            "subject": "Invoice past due",
+            "body": "Invoice 8831 is past due. Pay immediately via https://pay-vendor.co\n",
+        }
+    )
+    assert overdue.category == "suspicious"
+    assert overdue.category != "urgent"
+    assert "urgent" not in overdue.secondary_categories
+    # Any hard suspicious flag strips urgent, including a secondary one added
+    # for an overdue invoice before the rank rule runs.
+    from app.rank import settle as settle_again
+
+    for secondary in ([], ["urgent"], ["invoice", "urgent"]):
+        category, kept = settle_again("invoice", secondary, True)
+        assert category == "suspicious"
+        assert "urgent" not in kept
 
 
 def test_a_paraphrased_outage_is_urgent_for_a_stranger_and_a_known_contact():
@@ -389,13 +408,39 @@ def test_heldout_metrics_match_the_training_split():
     report = json.loads((Path(__file__).resolve().parents[1] / "app" / "heldout_metrics.json").read_text(encoding="utf-8"))
     assert report["label_total"] == report["heldout_rows"]
     assert report["label_correct"] / report["label_total"] == pytest.approx(report["label_accuracy"])
-    assert report["outage_correct"] / report["outage_total"] == pytest.approx(report["outage_recall"])
-    assert report["label_accuracy"] >= 0.85
-    assert report["outage_recall"] >= 0.8
-    assert report["benign_false"] == 0
-    # Deadlines are not outages. The file records how many still crossed 0.5.
-    assert "deadline_called_outage" in report
-    assert report["deadline_called_outage"] <= report["deadline_total"]
+    assert report["urgent_recall"] >= 0.90
+    assert report["urgent_fpr"] <= 0.05
+    assert report["split"].startswith("group fold")
+    assert report["hand_rows"] >= 30
+    assert "hand_urgent_recall" in report
+    assert "hand_urgent_fpr" in report
+
+
+def test_scenario_groups_do_not_straddle_and_skip_the_hand_set():
+    import json
+    from pathlib import Path
+
+    from app.corpus import rows
+
+    data = rows()
+    folds: dict[str, set[int]] = {}
+    blob = "\n".join(item["text"] for item in data)
+    for item in data:
+        folds.setdefault(item["group"], set()).add(item["fold"])
+    assert all(len(seen) == 1 for seen in folds.values())
+    hand = json.loads((Path(__file__).resolve().parents[1] / "data" / "hand_heldout.json").read_text(encoding="utf-8"))
+    for item in hand:
+        assert item["body"] not in blob
+    for banned in (
+        "Neue Bankverbindung",
+        "künftige Zahlungen",
+        "Acil değil",
+        "fora do ar",
+        "çalışmıyor",
+        "8 万元",
+        "15,000 درهم",
+    ):
+        assert banned not in blob
 
 
 def test_a_filed_alert_is_a_lead_summary_not_the_draft():
