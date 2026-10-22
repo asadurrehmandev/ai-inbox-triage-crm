@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ApprovalCard } from "@/components/approval-card";
 import { LaneShell } from "@/components/lane-shell";
 import { Metrics } from "@/components/metrics";
+import { DeskLogin } from "@/components/desk-login";
 import { useDesk } from "@/components/use-desk";
 import { cadence, CATEGORY_COLOR, categoryLabel, formatWhen, type Triage } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -14,6 +15,7 @@ const FILTERS = [
   { id: "approval", label: "Needs approval" },
   { id: "lead", label: "Leads" },
   { id: "urgent", label: "Urgent" },
+  { id: "review", label: "Needs review" },
   { id: "suspicious", label: "Suspicious" },
   { id: "all", label: "All classified" },
 ] as const;
@@ -26,7 +28,9 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
 
   const visible = useMemo(() => {
     return desk.items.filter((item) => {
-      if (filter === "approval") return !item.approved && item.category !== "spam" && item.category !== "suspicious";
+      if (filter === "approval") {
+        return !item.approved && !["spam", "suspicious", "review"].includes(item.category);
+      }
       if (filter === "all") return true;
       return item.category === filter;
     });
@@ -47,6 +51,10 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
       return;
     }
     setPickedId(item.id);
+  }
+
+  if (desk.error === "unauthorized" && !desk.stats) {
+    return <DeskLogin onDone={() => void desk.refresh()} />;
   }
 
   return (

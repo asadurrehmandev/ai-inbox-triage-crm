@@ -34,6 +34,9 @@ def render_alert(category: str, record: dict) -> tuple[str, str]:
     elif category == "suspicious":
         title = "Possible phishing — do not pay or reply"
         body = f"{name} at {company}. {subject}".strip()
+    elif category == "review":
+        title = "Needs review"
+        body = f"{name} at {company}. {subject}".strip()
     else:
         title = "Filed without a reply"
         body = f"{subject}".strip()
@@ -42,8 +45,8 @@ def render_alert(category: str, record: dict) -> tuple[str, str]:
 
 def post_alert(category: str, record: dict, title: str | None = None, body: str | None = None) -> dict:
     rendered_title, rendered_body = render_alert(category, record)
-    title = title or rendered_title
-    body = body or rendered_body
+    title = escape_mrkdwn(title) if title else rendered_title
+    body = escape_mrkdwn(body) if body else rendered_body
     stored = db.insert_alert(
         {
             "email_id": record.get("email_id"),

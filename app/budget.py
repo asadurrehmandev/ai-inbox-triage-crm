@@ -11,8 +11,33 @@ _NUM = (
     r"|\d+(?:[.,]\d+)?"
     r")"
 )
-_CUR = r"(?:USD|US\$|EUR|GBP|\$|€|£)"
-_MONEY_WORDS = ("budget", "pay", "spend", "aside", "usd", "eur", "gbp", "dollar", "dollars")
+_CUR = r"(?:USD|US\$|EUR|GBP|MXN|BRL|R\$|\$|€|£)"
+_MONEY_WORDS = ("budget", "pay", "spend", "aside", "usd", "eur", "gbp", "mxn", "brl", "dollar", "dollars", "quid")
+_WORD_VALUES = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_WORD_AMOUNT = re.compile(
+    r"\b(?P<w>[a-z]+)\s+(?P<unit>hundred|thousand)\b(?:\s+(?P<cur>quid|dollars?|euros?|pounds?))?",
+    re.IGNORECASE,
+)
+_THOUSAND_RANGE = re.compile(
+    r"\b(?P<a>\d+(?:\.\d+)?)\s*[-–—]\s*(?P<b>\d+(?:\.\d+)?)\s*thousand\b",
+    re.IGNORECASE,
+)
+_THOUSAND = re.compile(r"\b(?P<a>\d+(?:\.\d+)?)\s*thousand\b", re.IGNORECASE)
+_BETWEEN_K = re.compile(
+    r"\bbetween\s+(?P<a>\d+(?:\.\d+)?)\s+and\s+(?P<b>\d+(?:\.\d+)?)\s*k\b",
+    re.IGNORECASE,
+)
+_REAL = re.compile(rf"R\$\s?(?P<num>{_NUM})", re.IGNORECASE)
+_MXN = re.compile(rf"(?:MXN\s?(?P<num>{_NUM})|(?P<num2>{_NUM})\s*MXN)", re.IGNORECASE)
+_WORD_TAIL = re.compile(
+    rf"(?P<num>{_NUM})\s*(?P<cur>dollars?|quid|pounds?|euros?|reais)\b",
+    re.IGNORECASE,
+)
 
 _RANGE = re.compile(
     rf"(?P<c1>{_CUR})\s?(?P<n1>{_NUM})\s*[–—-]\s*(?P<c2>{_CUR})?\s?(?P<n2>{_NUM})",
@@ -50,7 +75,12 @@ def parse_number(raw: str) -> float:
 
 def _symbol(token: str) -> str:
     key = token.upper().replace("US$", "USD")
-    return {"USD": "$", "EUR": "€", "GBP": "£", "$": "$", "€": "€", "£": "£"}.get(key, "$")
+    return {
+        "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$", "MXN": "MXN",
+        "DOLLAR": "$", "DOLLARS": "$", "QUID": "£", "POUND": "£", "POUNDS": "£",
+        "EURO": "€", "EUROS": "€", "REAIS": "R$",
+        "$": "$", "€": "€", "£": "£", "R$": "R$",
+    }.get(key, "$")
 
 
 def _fmt(symbol: str, value: float, hourly: bool = False) -> str:
@@ -73,10 +103,45 @@ def _near_money_word(text: str, start: int, end: int) -> bool:
     return any(token in _MONEY_WORDS or token in {"$", "€", "£"} for token in before + after)
 
 
+def _word_number(token: str) -> float | None:
+    return _WORD_VALUES.get(token.lower())
+
+
+def _range(symbol: str, left: float, right: float) -> str:
+    return f"{_fmt(symbol, left)}–{_fmt(symbol, right)}"
+
+
 def extract_budget(text: str) -> str | None:
     """Return one normalized amount, or None when the text is not naming a price."""
     if not text:
         return None
+    words = _WORD_AMOUNT.search(text)
+    if words and _word_number(words.group("w")) is not None:
+        base = _word_number(words.group("w")) or 0
+        factor = 100 if words.group("unit").lower() == "hundred" else 1000
+        symbol = _symbol(words.group("cur") or "$")
+        return _fmt(symbol, base * factor)
+    thousand_range = _THOUSAND_RANGE.search(text)
+    if thousand_range:
+        symbol = "€" if re.search(r"\beuros?\b", text, re.I) else "$"
+        if re.search(r"\b(quid|pounds?)\b", text, re.I):
+            symbol = "£"
+        return _range(symbol, float(thousand_range.group("a")) * 1000, float(thousand_range.group("b")) * 1000)
+    between = _BETWEEN_K.search(text)
+    if between:
+        symbol = "€" if re.search(r"\beuros?\b", text, re.I) else "$"
+        if re.search(r"\b(quid|pounds?)\b", text, re.I):
+            symbol = "£"
+        return _range(symbol, float(between.group("a")) * 1000, float(between.group("b")) * 1000)
+    real = _REAL.search(text)
+    if real:
+        return _fmt("R$", parse_number(real.group("num")))
+    mxn = _MXN.search(text)
+    if mxn:
+        return _fmt("MXN", parse_number(mxn.group("num") or mxn.group("num2")))
+    thousand = _THOUSAND.search(text)
+    if thousand:
+        return _fmt("$", float(thousand.group("a")) * 1000)
     ranged = _RANGE.search(text)
     if ranged:
         symbol = _symbol(ranged.group("c1"))
@@ -101,6 +166,9 @@ def extract_budget(text: str) -> str | None:
     chosen = _prefer_amount(text, prefix, suffix)
     if chosen:
         return chosen
+    spoken = _WORD_TAIL.search(text)
+    if spoken:
+        return _fmt(_symbol(spoken.group("cur")), parse_number(spoken.group("num")))
     bare = _BARE_K.search(text)
     if bare and _near_money_word(text, bare.start(), bare.end()):
         clause = text[max(0, bare.start() - 24) : bare.end() + 12]
@@ -109,6 +177,23 @@ def extract_budget(text: str) -> str | None:
             symbol = "£"
         return _fmt(symbol, float(bare.group("num")) * 1000)
     return None
+
+
+def amount_in_text(claimed: str, visible: str) -> bool:
+    """True when the claimed amount is written in the visible message, not only invented."""
+    if not claimed or not visible:
+        return False
+    if claimed.casefold() in visible.casefold():
+        return True
+    match = re.search(r"\d[\d,]*", claimed.replace(" ", ""))
+    if not match:
+        return False
+    digits = match.group(0).replace(",", "")
+    for token in re.findall(r"\d[\d.,]*", visible):
+        compact = re.sub(r"[.,](?=\d{3}(?:\D|$))", "", token).replace(",", "").replace(".", "")
+        if compact == digits:
+            return True
+    return False
 
 
 def _prefer_amount(text: str, prefix: re.Match | None, suffix: re.Match | None) -> str | None:

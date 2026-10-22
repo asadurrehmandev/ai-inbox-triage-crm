@@ -55,27 +55,83 @@ def _post_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
     return response
 
 
+_HUBSPOT_PROPS = (
+    ("lane_budget", "Lane budget"),
+    ("lane_intent", "Lane intent"),
+)
+
+
+def _hubspot_headers(token: str) -> dict:
+    return {"authorization": f"Bearer {token}", "content-type": "application/json"}
+
+
+def _ensure_hubspot_properties(token: str) -> None:
+    """Create lane_budget and lane_intent on a stock portal. 409 means they exist."""
+    for name, label in _HUBSPOT_PROPS:
+        response = httpx.post(
+            "https://api.hubapi.com/crm/v3/properties/contacts",
+            headers=_hubspot_headers(token),
+            json={
+                "name": name,
+                "label": label,
+                "type": "string",
+                "fieldType": "text",
+                "groupName": "contactinformation",
+                "description": "Written by Lane inbox triage.",
+            },
+            timeout=20,
+        )
+        if response.status_code not in {200, 201, 409}:
+            response.raise_for_status()
+
+
+def _hubspot_note(token: str, email: str, lead: dict) -> None:
+    note = f"Lane budget: {lead.get('budget') or 'none'}. Lane intent: {lead.get('intent') or 'none'}."
+    _post_retry(
+        "https://api.hubapi.com/crm/v3/objects/notes",
+        headers=_hubspot_headers(token),
+        payload={
+            "properties": {"hs_note_body": note, "hs_timestamp": db.now()},
+            "associations": [],
+        },
+    )
+    _ = email
+
+
+def _upsert_hubspot(token: str, email: str, properties: dict) -> httpx.Response:
+    return _post_retry(
+        "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        headers=_hubspot_headers(token),
+        payload={"inputs": [{"idProperty": "email", "id": email, "properties": properties}]},
+    )
+
+
 def _push_hubspot(lead: dict) -> bool:
     token = os.environ.get("HUBSPOT_TOKEN", "").strip()
     email = (lead.get("email") or "").strip()
     if not token or not email:
         return False
     properties = hubspot_properties(lead)
-    properties["lane_budget"] = lead.get("budget") or ""
-    properties["lane_intent"] = lead.get("intent") or ""
-    _post_retry(
-        "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
-        headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
-        payload={
-            "inputs": [
-                {
-                    "idProperty": "email",
-                    "id": email,
-                    "properties": properties,
-                }
-            ]
-        },
-    )
+    custom = {
+        **properties,
+        "lane_budget": lead.get("budget") or "",
+        "lane_intent": lead.get("intent") or "",
+    }
+    try:
+        _upsert_hubspot(token, email, custom)
+        return True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise
+    _ensure_hubspot_properties(token)
+    try:
+        _upsert_hubspot(token, email, custom)
+        return True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise
+    _upsert_hubspot(token, email, properties)
+    _hubspot_note(token, email, lead)
     return True
 
 
@@ -87,6 +143,27 @@ def _push_highlevel(lead: dict) -> bool:
         return False
     payload = highlevel_payload(lead)
     payload["locationId"] = location
+    payload["customFields"] = [
+        {"key": "lane_budget", "field_value": lead.get("budget") or ""},
+        {"key": "lane_intent", "field_value": lead.get("intent") or ""},
+    ]
+    try:
+        _post_retry(
+            "https://services.leadconnectorhq.com/contacts/upsert",
+            headers={
+                "authorization": f"Bearer {token}",
+                "version": "2021-07-28",
+                "content-type": "application/json",
+            },
+            payload=payload,
+        )
+        return True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise
+    payload.pop("customFields", None)
+    note = f"Lane budget: {lead.get('budget') or 'none'}. Lane intent: {lead.get('intent') or 'none'}."
+    payload["source"] = f"Lane inbox triage. {note}"
     _post_retry(
         "https://services.leadconnectorhq.com/contacts/upsert",
         headers={

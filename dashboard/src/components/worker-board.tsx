@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { DeskLogin } from "@/components/desk-login";
 import { LaneShell } from "@/components/lane-shell";
 import { Metrics } from "@/components/metrics";
 import { useDesk } from "@/components/use-desk";
@@ -49,6 +50,9 @@ const SOURCE: Record<string, string> = {
 export function WorkerBoard() {
   const desk = useDesk();
   const worker = desk.worker;
+  if (desk.error === "unauthorized" && !desk.stats) {
+    return <DeskLogin onDone={() => void desk.refresh()} />;
+  }
   return (
     <LaneShell stats={desk.stats}>
       {desk.stats ? <Metrics stats={desk.stats} /> : null}

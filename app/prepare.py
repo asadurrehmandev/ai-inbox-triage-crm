@@ -11,9 +11,11 @@ _FORWARD = re.compile(
 )
 _FROM = re.compile(r"^From:\s*(?P<who>.+)$", re.IGNORECASE | re.MULTILINE)
 _INJECTION_NOTE = re.compile(
-    r"\((?:note to (?:any )?ai assistant|system note)[^)]{0,240}\)",
+    r"\((?:note to (?:any )?ai assistant|system note)[^)]{0,400}\)",
     re.IGNORECASE,
 )
+_WROTE = re.compile(r"^On .+ wrote:\s*$", re.IGNORECASE)
+_QUOTE_SPLIT = re.compile(r"\nOn .{0,180} wrote:\s*\n", re.IGNORECASE)
 
 
 class _TextExtractor(HTMLParser):
@@ -72,6 +74,22 @@ def _split_from(value: str) -> tuple[str, str]:
 
 def strip_injection_notes(text: str) -> str:
     return _INJECTION_NOTE.sub(" ", text)
+
+
+def strip_quotes(text: str) -> str:
+    """Drop quoted reply history so an older pitch cannot score the new message."""
+    kept: list[str] = []
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith(">"):
+            continue
+        if _WROTE.match(line.strip()):
+            break
+        kept.append(line)
+    joined = "\n".join(kept)
+    match = _QUOTE_SPLIT.search("\n" + joined)
+    if match:
+        joined = ("\n" + joined)[: match.start()]
+    return joined.strip()
 
 
 def head_and_tail(text: str, limit: int = 20_000) -> str:

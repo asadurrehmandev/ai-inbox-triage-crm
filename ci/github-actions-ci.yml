@@ -27,8 +27,9 @@ jobs:
       - name: Dashboard lint and build
         working-directory: dashboard
         env:
-          NEXT_PUBLIC_API_BASE: http://127.0.0.1:8741/api
-          NEXT_PUBLIC_API_TOKEN: lane-demo-token
+          API_BASE_URL: http://127.0.0.1:8741/api
+          API_TOKEN: lane-demo-token
+          DASHBOARD_PASSWORD: lane-demo
         run: |
           npm ci
           npm run lint

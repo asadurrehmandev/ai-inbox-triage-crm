@@ -72,7 +72,7 @@ def test_anthropic_request_is_bounded_and_retries(monkeypatch):
 
     monkeypatch.setattr(httpx, "post", fake_post)
     huge = dict(EMAIL)
-    huge["body"] = "We are interested in a proposal.\n" + ("filler " * 8000) + "\nThanks,\nJane Cole\nAcme Robotics"
+    huge["body"] = "We are interested in a proposal. Budget is $8,000.\n" + ("filler " * 8000) + "\nThanks,\nJane Cole\nAcme Robotics"
     result = classify_email(huge)
     assert result.model == "anthropic"
     assert result.category == "lead"
@@ -101,6 +101,45 @@ def test_failed_call_is_a_logged_fallback(monkeypatch, caplog):
     assert result.llm_error == "HTTPStatusError:503"
     assert result.category == "lead"
     assert "llm_fallback" in caplog.text
+
+
+def test_overloaded_529_is_retried(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF", "0")
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _response(529, {"error": {"type": "overloaded_error"}})
+        return _response(200, _tool(GOOD))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = classify_email(EMAIL)
+    assert calls["n"] == 3
+    assert result.model == "anthropic"
+    assert result.category == "lead"
+
+
+def test_invented_budget_is_not_trusted(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    fooled = {**GOOD, "category": "lead", "budget": "$90,000", "name": "Jordan Lee"}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _response(200, _tool(fooled))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    email = {
+        "from_name": "Ned Alvarez",
+        "from_email": "ned@alvarezbikes.com",
+        "subject": "filter question",
+        "body": "Hi Asad,\n\nHow do I hide archived threads in the desk?\n\nNed Alvarez\nAlvarez Bikes",
+    }
+    result = classify_email(email)
+    assert result.category == "review"
+    assert result.budget is None
+    assert result.model_suggestion == "lead"
+    assert "90,000" in result.draft_reply
 
 
 def test_suspicious_mail_does_not_call_the_model(monkeypatch):

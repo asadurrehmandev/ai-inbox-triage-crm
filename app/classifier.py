@@ -11,10 +11,10 @@ import re
 from dataclasses import dataclass, field
 
 from app.budget import extract_budget
-from app.prepare import head_and_tail, html_to_text, strip_injection_notes, unwrap_forward
+from app.prepare import head_and_tail, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
 from app.risk import assess_risk, hard_flags
 
-CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious")
+CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")
 
 _CLOSINGS = re.compile(
     r"^(thanks|thank you|best regards|kind regards|warm regards|many thanks|best|regards|sincerely|cheers|warmly|cordialement|saludos|mit freundlichen grüßen),?\s*$",
@@ -84,14 +84,10 @@ _JOB_LINE = re.compile(
     r"general|managing|vice|operations|customer|account)\s+)*"
     r"(?:owner|founder|co-founder|coordinator|producer|associate|director|manager|officer|"
     r"controller|president|partner|principal|engineer|accountant|specialist|analyst|"
-    r"consultant|counsel|supervisor)$",
+    r"consultant|counsel|supervisor|lead)$",
     re.IGNORECASE,
 )
-_COLD = re.compile(
-    r"(qualified leads per month|we help (?:\w+ ){0,3}(?:agencies|businesses|companies)|"
-    r"reply\s+stop|can i send over|book a time on my calendar)",
-    re.IGNORECASE,
-)
+_COLD = re.compile(r"reply\s+stop", re.IGNORECASE)
 _VENDOR = re.compile(r"(trial expires|upgrade now|your trial ends)", re.IGNORECASE)
 _OOO = re.compile(
     r"^(out of office|automatic reply|auto-?reply)\b|i am out of the office",
@@ -118,6 +114,7 @@ class Classification:
     forwarded_by: str | None = None
     contact_email: str | None = None
     llm_error: str | None = None
+    model_suggestion: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -134,6 +131,7 @@ class Classification:
             "forwarded_by": self.forwarded_by,
             "contact_email": self.contact_email,
             "llm_error": self.llm_error,
+            "model_suggestion": self.model_suggestion,
         }
 
 
@@ -178,14 +176,31 @@ def _score(text: str, email: dict) -> dict[str, float]:
     if re.search(r"\b(losing (?:orders|money|customers|patients))\b", lowered):
         scores["urgent"] += 4
     if re.search(
-        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
+        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|by \d{1,2}\s?(?:am|pm) today|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
         lowered,
     ):
         scores["urgent"] += 5
     if re.search(r"\b(sev-?1|p0)\b", lowered):
         scores["urgent"] += 6
+    immediacy = re.search(
+        r"\b(right now|asap|immediately|caída|urgente|urgence)\b",
+        lowered,
+    )
+    impact = re.search(
+        r"\b(for everyone|everyone|every|nothing is shipping|blank (?:white )?page|errors on every|customers|orders|patients)\b",
+        lowered,
+    )
+    broken = re.search(r"\b(down|broken|stopped|error|errors|failing|switch it off)\b", lowered)
+    if re.search(r"\bnothing is shipping\b", lowered) or (
+        re.search(r"\bblank (?:white )?page\b", lowered) and impact
+    ):
+        scores["urgent"] += 6
+    if immediacy and (impact or broken):
+        scores["urgent"] += 6
+    if re.search(r"\b(caída|urgente)\b", lowered) and re.search(r"\b(caída|pedido|pedidos|web|página|pagina)\b", lowered):
+        scores["urgent"] += 4
 
-    if re.search(r"\b(proposal|quote|pricing|rfp|retainer|freelancer|sow|demo|spend)\b", lowered):
+    if re.search(r"\b(proposal|pricing|rfp|retainer|freelancer|sow|demo|spend|could you quote|a quote)\b", lowered):
         scores["lead"] += 4
     if re.search(r"\b(hire|discovery call|set aside)\b", lowered):
         scores["lead"] += 3
@@ -198,6 +213,8 @@ def _score(text: str, email: dict) -> dict[str, float]:
 
     if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
         scores["support"] += 4
+    if re.search(r"\berror\s?\d{3}\b", lowered) and not (http_error and impact and harm):
+        scores["support"] += 4
     if re.search(r"\b(password reset|account locked|can't log ?in|cannot log ?in|won't download|blank screen)\b", lowered):
         scores["support"] += 4
     if re.search(r"\b(can you (?:check|look|take a look)|when you have a minute)\b", lowered):
@@ -205,7 +222,8 @@ def _score(text: str, email: dict) -> dict[str, float]:
 
     if _VENDOR.search(lowered) or re.search(r"\b(no-?reply|noreply)\b", sender):
         scores["lead"] -= 8
-        scores["spam"] += 3
+        if scores["invoice"] < 4:
+            scores["spam"] += 3
     if _OOO.search(email.get("subject") or "") or _OOO.search(lowered):
         scores["lead"] -= 8
         scores["spam"] += 4
@@ -223,20 +241,24 @@ def _score(text: str, email: dict) -> dict[str, float]:
 def _choose(scores: dict[str, float]) -> tuple[str, list[str], float]:
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     best_name, best = ranked[0]
-    second_name, second = ranked[1]
+    second = ranked[1][1]
     if best <= 0:
-        return "support", [], 0.45
+        return "review", [], 0.35
     # A past-due invoice that only says "urgent" stays an invoice.
     if scores["invoice"] >= 4 and scores["invoice"] >= scores["urgent"] - 1 and best_name == "urgent":
         best_name, best = "invoice", scores["invoice"]
+        second = max(value for name, value in scores.items() if name != "invoice")
+    # Lead, invoice, and urgent are filed only when the score is clear.
+    # Anything weaker waits in the review queue instead of being guessed.
+    close = best < 5 and second >= 3 and best - second < 2
+    if best < 4 or (best_name in {"lead", "urgent", "invoice"} and close):
+        return "review", [], round(min(0.49, 0.28 + best * 0.04), 2)
     secondary: list[str] = []
-    if scores["lead"] >= 3 and scores["support"] >= 3 and best_name in {"lead", "support"}:
+    if scores["lead"] >= 4 and scores["support"] >= 4 and best_name in {"lead", "support"}:
         other = "support" if best_name == "lead" else "lead"
         secondary.append(other)
     margin = best - second
     confidence = max(0.55, min(0.97, 0.62 + margin * 0.05))
-    if best < 3:
-        confidence = min(confidence, 0.6)
     return best_name, secondary, round(confidence, 2)
 
 
@@ -383,10 +405,16 @@ def _company_line(line: str) -> bool:
         return False
     if re.search(r"\b(is|are|was|were|please|click|unsubscribe|opt out|department|service)\b", line, re.IGNORECASE):
         return False
+    if re.search(r"(様$|sort code|account\s*:|thanks for your)", line, re.IGNORECASE):
+        return False
+    if re.match(r"^(thanks|thank you)\b", line, re.IGNORECASE):
+        return False
     return len(line.split()) <= 6
 
 
 def extract_intent(category: str, text: str) -> str:
+    if category == "review":
+        return "needs a person to read it"
     if category == "suspicious":
         return "review a suspicious message"
     if category == "spam":
@@ -433,13 +461,17 @@ def draft_reply(category: str, name: str | None, intent: str, flags: list[str] |
             "Asad Rehman\nLane"
         )
     if category == "invoice":
-        if intent == "confirm remittance":
-            action = "I will match this against the open item and confirm it is closed today."
-        elif intent == "resolve a duplicate charge":
-            action = "I will compare the two charges and reply with what should be refunded."
-        else:
-            action = "I will match this against the open invoice and confirm payment status today."
-        return f"{hello}\n\nReceived. {action}\n\nAsad Rehman\nLane"
+        return (
+            f"{hello}\n\nThis looks like billing. It is in the queue for a person "
+            "to check before any payment is sent or any item is marked closed.\n\n"
+            "Asad Rehman\nLane"
+        )
+    if category == "review":
+        return (
+            "Needs review. The rules were not confident enough to file this as a lead, "
+            "an invoice, or urgent. Nothing was written to the CRM.\n\n"
+            "Asad Rehman\nLane"
+        )
     if category == "urgent":
         return (
             f"{hello}\n\n"
@@ -468,15 +500,19 @@ def _suppress_budget(email: dict, text: str) -> bool:
 
 def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Classification:
     prepared = unwrap_forward(email)
-    text = strip_injection_notes(_plain(prepared))
-    flags = assess_risk(prepared, _plain(prepared), known_contacts)
+    raw = prepared.get("body") or ""
+    full = _plain(prepared)
+    text = strip_quotes(strip_injection_notes(full))
+    flags = assess_risk(prepared, full, raw, known_contacts)
     blocking = hard_flags(flags)
+    visible = dict(prepared)
+    visible["body"] = strip_quotes(html_to_text(raw))
     if blocking:
         return Classification(
             category="suspicious",
             confidence=0.9,
-            name=extract_name(prepared),
-            company=extract_company(prepared),
+            name=extract_name(visible),
+            company=extract_company(visible),
             budget=None,
             intent="review a suspicious message",
             draft_reply=draft_reply("suspicious", None, "", blocking),
@@ -486,13 +522,15 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Cla
             contact_email=prepared.get("from_email"),
         )
     category, secondary, confidence = _choose(_score(text, prepared))
-    name = extract_name(prepared)
-    company = extract_company(prepared)
+    name = extract_name(visible)
+    company = extract_company(visible)
     auto = (prepared.get("auto_submitted") or "").lower()
     if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
         name = None
         company = None
-    budget = None if _suppress_budget(prepared, text) else extract_budget(text)
+    budget = extract_budget(text)
+    if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
+        budget = None
     intent = extract_intent(category, text)
     return Classification(
         category=category,

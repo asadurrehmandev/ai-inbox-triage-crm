@@ -48,7 +48,7 @@ export function Metrics({ stats }: { stats: Stats }) {
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
         {stats.minutes_per_email} minutes each for reading, labeling, the CRM entry, and a first reply.
-        Spam and suspicious mail are not counted. The {stats.projected_daily_hours.toFixed(1)} hour
+        Spam, suspicious, and needs-review mail are not counted. The {stats.projected_daily_hours.toFixed(1)} hour
         figure assumes {stats.projected_daily_volume} messages a day. It is not a measurement.
       </p>
     </section>

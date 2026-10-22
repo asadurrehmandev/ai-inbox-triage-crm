@@ -1,5 +1,7 @@
 """Pipeline, CRM, and approval behavior against a throwaway mailbox."""
 
+import pytest
+
 from app.crm import active_adapters, highlevel_payload, hubspot_properties
 from tests.conftest import signed_body
 
@@ -124,6 +126,8 @@ def test_desk_routes_require_a_bearer_token(client):
     assert denied.status_code == 401
     assert client.get("/api/health").status_code == 200
     assert client.get("/api/stats").status_code == 200
+    for path in ("/api/intake/pending", "/api/stats", "/api/runs", "/api/worker"):
+        assert client.get(path, headers={"Authorization": ""}).status_code == 401
 
 
 def test_webhook_signature_and_idempotency(client):
@@ -344,3 +348,43 @@ def test_slack_text_is_escaped_and_failures_are_recorded(client, monkeypatch):
     stored = post_alert("lead", {"email_id": "m01", "name": "Jane", "subject": "Hi"})
     assert stored["delivered"] is False
     assert stored["delivery_error"] == "HTTP 500"
+    titled = post_alert("lead", {"email_id": "m01", "name": "Jane"}, title="<!channel> wire now")
+    assert "<!channel>" not in titled["title"]
+    assert "&lt;!channel&gt;" in titled["title"]
+
+
+def test_triage_rejects_a_bad_category_and_an_approved_overwrite(client):
+    jane = next(item for item in client.get("/api/triage").json()["items"] if item["email_id"] == "m01")
+    rejected = client.post(
+        "/api/triage",
+        json={
+            "email_id": "m01",
+            "category": "pwned",
+            "confidence": 99,
+            "intent": "nope",
+            "draft_reply": "hi",
+        },
+    )
+    assert rejected.status_code == 422
+    assert client.post(f"/api/triage/{jane['id']}/approve").status_code == 200
+    overwrite = client.post(
+        "/api/triage",
+        json={
+            "email_id": "m01",
+            "category": "spam",
+            "confidence": 0.2,
+            "intent": "nope",
+            "draft_reply": "changed",
+        },
+    )
+    assert overwrite.status_code == 409
+
+
+def test_production_mode_refuses_the_sample_secrets(monkeypatch):
+    monkeypatch.setenv("DEMO_MODE", "false")
+    monkeypatch.setenv("API_TOKEN", "lane-demo-token")
+    monkeypatch.setenv("WEBHOOK_SECRET", "lane-demo-webhook")
+    from app.main import assert_runtime_secrets
+
+    with pytest.raises(RuntimeError):
+        assert_runtime_secrets()

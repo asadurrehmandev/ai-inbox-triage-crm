@@ -57,7 +57,7 @@ def test_non_leads_do_not_look_like_sales():
     assert ooo.name is None
 
     trial = classify_rules(_mail("q33"))
-    assert trial.category in {"spam", "support"}
+    assert trial.category != "lead"
     assert trial.budget is None
 
     refund = classify_rules(_mail("q35"))

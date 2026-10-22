@@ -1,5 +1,6 @@
 "use client";
 
+import { DeskLogin } from "@/components/desk-login";
 import { LaneShell } from "@/components/lane-shell";
 import { Metrics } from "@/components/metrics";
 import { useDesk } from "@/components/use-desk";
@@ -7,6 +8,9 @@ import { CATEGORY_COLOR, categoryLabel, formatWhen } from "@/lib/types";
 
 export function AlertFeed() {
   const desk = useDesk();
+  if (desk.error === "unauthorized" && !desk.stats) {
+    return <DeskLogin onDone={() => void desk.refresh()} />;
+  }
   return (
     <LaneShell stats={desk.stats}>
       {desk.stats ? <Metrics stats={desk.stats} /> : null}

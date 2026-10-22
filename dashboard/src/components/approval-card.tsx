@@ -80,7 +80,9 @@ export function ApprovalCard({
       <div className="flex flex-1 flex-col gap-3 px-5 pb-8 md:px-8">
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-sm tracking-[0.14em] uppercase text-muted-foreground">
-            {item.category === "spam" || item.category === "suspicious" ? "Internal note" : "Draft reply"}
+            {item.category === "spam" || item.category === "suspicious" || item.category === "review"
+              ? "Internal note"
+              : "Draft reply"}
           </h2>
           <p className="text-xs text-muted-foreground">
             {item.approved
@@ -96,11 +98,13 @@ export function ApprovalCard({
           className="min-h-40 bg-card font-serif text-base leading-7"
           aria-label="Draft reply"
         />
-        {item.category === "spam" || item.category === "suspicious" ? (
+        {item.category === "spam" || item.category === "suspicious" || item.category === "review" ? (
           <p className="text-sm text-muted-foreground">
             {item.category === "suspicious"
               ? "Flagged before classification. Do not pay, do not reply, and do not write this to the CRM."
-              : "Spam is not answered and is not written to the CRM."}
+              : item.category === "review"
+                ? "Not confident enough to file. Nothing was written to the CRM."
+                : "Spam is not answered and is not written to the CRM."}
           </p>
         ) : null}
         <div className="flex flex-wrap gap-2">
@@ -124,7 +128,9 @@ export function ApprovalCard({
               setNote(item.category === "spam" ? "Archived." : "Reply approved.");
             }}
           >
-            {item.category === "spam" || item.category === "suspicious" ? "Approve and archive" : "Approve reply"}
+            {item.category === "spam" || item.category === "suspicious" || item.category === "review"
+              ? "Approve and archive"
+              : "Approve reply"}
           </Button>
         </div>
         {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}

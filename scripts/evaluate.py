@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from app.classifier import classify_rules
@@ -43,8 +44,21 @@ def field_hit(actual: str | None, expected: str | None) -> bool:
         return actual is None and expected is None
     if str(actual).casefold() == str(expected).casefold():
         return True
-    # A range or an hourly rate is correct when it still contains the labeled amount.
-    return str(expected) in str(actual)
+    # A range or an hourly rate counts when the labeled amount is a whole token.
+    # "$5,000" does not count as inside "$5,000,000".
+    hay = str(actual)
+    needle = str(expected)
+    folded = hay.casefold()
+    wanted = needle.casefold()
+    start = 0
+    while True:
+        index = folded.find(wanted, start)
+        if index == -1:
+            return False
+        after = hay[index + len(needle) :]
+        if not re.match(r"[,.]?\d", after):
+            return True
+        start = index + 1
 
 
 def score(emails: list[dict]) -> dict:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email
+from app.risk import hard_flags
 
 
 def record_from_email(email: dict, result: Classification) -> dict:
@@ -49,16 +50,26 @@ def notify(email: dict, result: Classification) -> dict:
             title="Possible phishing — do not pay or reply",
             body=result.draft_reply,
         )
+    if result.category == "review":
+        return alerts.post_alert(
+            "review",
+            record_from_email(email, result),
+            title="Needs review",
+            body=result.draft_reply,
+        )
     return alerts.post_alert(result.category, record_from_email(email, result))
 
 
 def apply_policy(email: dict, result: Classification) -> dict:
-    """Leads go to the CRM. Spam stays quiet. Suspicious mail is alerted and not filed."""
+    """Confident leads go to the CRM. Risky or uncertain mail is never filed."""
     triage = save_classification(email, result)
     categories = {result.category, *result.secondary_categories}
     lead = None
     alert = None
-    if "lead" in categories and result.category not in {"spam", "suspicious"}:
+    blocked = result.category in {"spam", "suspicious", "review"} or bool(hard_flags(result.risk_flags))
+    if "budget_not_in_body" in result.risk_flags:
+        blocked = True
+    if "lead" in categories and not blocked:
         lead = push_lead(email, result)
     if result.category != "spam":
         alert = notify(email, result)
@@ -87,7 +98,13 @@ def process_email(email: dict) -> dict:
 
 
 def process_pending() -> list[dict]:
+    import logging
+
+    log = logging.getLogger("lane.pipeline")
     processed = []
     for email in db.list_emails(status="new"):
-        processed.append(process_email(email))
+        try:
+            processed.append(process_email(email))
+        except Exception:
+            log.exception("message_failed id=%s", email.get("id"))
     return processed

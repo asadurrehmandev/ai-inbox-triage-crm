@@ -75,18 +75,24 @@ flowchart LR
 
 ![Run the worker, then approve the reply](artifacts/worker_approval.gif)
 
-- **No paid keys required.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. Classification, extraction, and drafts use the rule engine, and the sidebar says so. Add an Anthropic key and the next pass calls Claude (`claude-sonnet-5-5`, the active Sonnet as of 2026-10-22). An OpenAI key is the second provider. If a live call fails, the rules still return a decision, the row is stored as `rules-fallback` with the error type, and `/api/health` counts those fallbacks.
+- **No paid keys required.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. Classification, extraction, and drafts use the rule engine, and the sidebar says so. Add an Anthropic key and the next pass calls Claude (`claude-sonnet-5-5`, the active Sonnet as of 2026-10-22). An OpenAI key is the second provider. If a live call fails, the rules still return a decision, the row is stored as `rules-fallback` with the error type, and `/api/health` counts those fallbacks. Retries cover 429, 5xx, and Anthropic's 529 overload status. A budget the model names has to be written in the message; otherwise the row is held for review and the model's draft is kept on the card.
 - **Webhook ingest.** `POST /api/webhooks/email` queues one message. The body must carry `X-Lane-Signature: sha256=<hmac of the raw body>` using `WEBHOOK_SECRET`. The same `message_id` (or the same sender, subject, time, and body) returns `duplicate` instead of queueing a second copy. The worker picks it up on the next pass, or immediately if you call `POST /api/worker/run`.
 - **Scheduler.** APScheduler polls on `WORKER_INTERVAL_SECONDS` (60 by default). The Worker page shows the next run and the log of passes.
 - **Mock mailbox.** Forty-four labeled messages stand in for IMAP. Eight stay unseen so Run worker has something to do.
-- **CRM adapter.** Every lead is written to the mock CRM the dashboard reads. Set `HUBSPOT_TOKEN` and the same contact is upserted in HubSpot by email, including `lane_budget` and `lane_intent`. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact. A remote failure is stored on the lead and shown in the CRM table.
+- **CRM adapter.** A confident lead is written to the mock CRM the dashboard reads. Suspicious mail and anything held for review are not. Set `HUBSPOT_TOKEN` and the same contact is upserted by email. Lane creates the contact properties `lane_budget` and `lane_intent` (string fields on the contact object) and, if the portal rejects them, writes the budget and intent into a note instead. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact with those two custom fields, or puts the same text on `source` if the location rejects custom fields. A remote failure is stored on the lead and shown in the CRM table.
 - **Mock Slack.** Alerts render in the dashboard. `SLACK_WEBHOOK_URL` also posts them.
 - **Approve or edit.** The draft is a real textarea. Approve marks the lead "Reply approved" and posts a second alert. Nothing is emailed until you connect a sender.
-- **Measured accuracy.** The numbers below are from the rule engine, which is what runs when no key is set. They are not a Claude score. `pytest` prints both sets.
+- **Measured accuracy.** The rule engine is a conservative fallback, not a claim about Claude. Low-confidence mail goes to **needs review** instead of being guessed as a lead, an invoice, or urgent. `pytest` prints the rates.
 
-  The dev mailbox (`data/sample_emails.json`, 44 messages) was used while the rules were written. Exact category match is **43/44**. The miss is `m35`, a McAfee lookalike labeled spam and filed as **suspicious**, which is the review state we want. Counting that as a correct spam decision is **44/44**. Name, company, and budget match **44/44**. Intent matches **43/44** (`m35` is "review a suspicious message" rather than "unsolicited promotion").
+  Dev mailbox (`data/sample_emails.json`, 44 messages, used while writing the rules): exact category **43/44**. The miss is `m35`, a McAfee lookalike labeled spam and filed as **suspicious**. Counting that as the right spam decision is **44/44**. Name, company, and budget **44/44**. Intent **43/44** (`m35` is "review a suspicious message").
 
-  The held-out file (`data/eval_unseen.json`, 68 messages: 36 from an outside review plus 32 more frozen in the same pass) was not used as a word list. Classification is **68/68**, where a suspicious decision counts as a hit on a spam label. On slots that have a name, company, or budget, the value matches **127/127**. On slots that are empty, the engine invented a value **0/77** times. Intent is not in that headline. A range such as `£15,000–£20,000` counts as correct when the labeled amount sits inside it.
+  `data/eval_unseen.json` (68 messages) was written in the same pass as an earlier ruleset and **was** used as a word list. It is not a held-out set. On the current rules it scores **53/68 (77.9%)**. Do not cite the old 68/68 figure.
+
+  Fresh set `data/eval_fresh.json` (36 messages) was hashed **before** this rules pass. SHA-256 `6598554eb9358b571f08d994bd50a7e4be414182d697170927063f35ce6cf857`, recorded in `data/eval_fresh.sha256`. Rules classification **34/36**. The two misses are a how-to with no defect word (`f02` → review) and a short note whose only commercial signal is an unsubscribe line (`f13` → review). All **7/7** structural phishing messages in that file are suspicious, with no budget and no CRM write.
+
+  Outside set `tests/new_emails_v2.py` (53 messages the rules were not fitted to). Rules mode: classification **25/53 (47%)**. Phishing, fraud, and injection **9/9** flagged suspicious. Legitimate mail flagged suspicious: **0/39**. Urgent **6/6**. Budget, where a value exists, **24/24**. Name + company + budget on filled slots **93/95**. Non-leads written to the CRM: **0**. Weak spots: plain support questions go to review (**0/7** called support), and **14** real leads are not filed because the rules will not guess "lead" without a clear buying signal. One legitimate payments lead (`n50`) is read as an invoice because the project is about invoices.
+
+  Mocked Claude, same 53 messages, no live key. An obedient mock that returns the labeled category: **52/53**. The miss is `n50`: the rules are confident it is an invoice, so the guard holds the model's lead for a person and does not write the CRM. All **9/9** attacks are blocked before the HTTP call (44 calls on the rest). A fooled mock that labels every message a $90,000 lead: the 9 attacks stay suspicious; an amount that is not in the message is dropped; **3** low-confidence invoices that do contain a real amount would be filed as leads. That is the remaining hole if the model is simply wrong.
 
 ## Run it
 
@@ -111,15 +117,18 @@ npm install
 npm run dev
 ```
 
-Open [the desk](http://127.0.0.1:8742). The API listens on `127.0.0.1:8741`. Mutations and the desk reads send `Authorization: Bearer $API_TOKEN`. The sample token in `.env.example` is for a local demo. Change it before you expose the port.
+Open [the desk](http://127.0.0.1:8742) and sign in with `DASHBOARD_PASSWORD` from `.env` (the sample is `lane-demo`). The browser talks only to the Next server. That server holds `API_TOKEN` and attaches it on the way to the API. The token is not compiled into the page. The API listens on `127.0.0.1:8741`. `GET /api/intake/pending`, `/api/stats`, `/api/runs`, and `/api/worker` require the bearer token, same as the other desk reads. `DEMO_MODE=false` refuses to boot when `API_TOKEN` or `WEBHOOK_SECRET` is empty or still set to the sample values.
 
 For a screenshot session, set `WORKER_INTERVAL_SECONDS=1800` so the sample queue stays put until you press Run worker.
 
 ### Docker
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
+
+Compose publishes `127.0.0.1:8741` and `127.0.0.1:8742` only. It does not fill in sample secrets: `API_TOKEN`, `WEBHOOK_SECRET`, and `DASHBOARD_PASSWORD` have to be in `.env`. `DEMO_MODE` defaults to false inside Compose, so the sample token in `.env.example` will be refused until you set `DEMO_MODE=true` for a local demo or replace the secrets.
 
 | Surface | URL |
 | --- | --- |
@@ -133,9 +142,16 @@ docker compose up --build
 
 **Outlook.** Power Automate (or a small Graph subscription) posts the same JSON to the webhook when mail hits a shared mailbox. Many Microsoft 365 tenants block basic IMAP, so the webhook is the path to prefer. IMAP (`outlook.office365.com`) still works for tenants that allow it, via `IMAP_HOST`, `IMAP_USER`, and `IMAP_PASSWORD`.
 
-**HubSpot.** Set `HUBSPOT_TOKEN` to a private app token with `crm.objects.contacts.write`. The adapter upserts the contact by email and writes `lane_budget` and `lane_intent` alongside the standard name and company fields. The mock row stays, so the desk and the CRM do not drift during a rollout.
+**HubSpot.** Set `HUBSPOT_TOKEN` to a private app token with `crm.objects.contacts.write` and `crm.schemas.contacts.write` (so Lane can create properties). On the first upsert Lane creates two contact properties if they are missing:
 
-**GoHighLevel.** Set `GHL_API_KEY` and `GHL_LOCATION_ID`. The adapter upserts the contact at LeadConnector with the source `Lane inbox triage`.
+| Property | Label | Type |
+| --- | --- | --- |
+| `lane_budget` | Lane budget | single-line text |
+| `lane_intent` | Lane intent | single-line text |
+
+Both sit in the `contactinformation` group. The upsert then sends them with the standard name, email, and company fields. If the portal still rejects the properties, Lane upserts the standard fields and writes the budget and intent as a note. The mock row stays either way.
+
+**GoHighLevel.** Set `GHL_API_KEY` and `GHL_LOCATION_ID`. The adapter upserts the contact and sends `lane_budget` and `lane_intent` as custom fields. If the location returns 400, it retries without those fields and puts the same text on `source`.
 
 **Slack.** Set `SLACK_WEBHOOK_URL`. The alert text is the same string the dashboard already shows.
 
@@ -164,7 +180,9 @@ Webhook body:
 | `app/risk.py` | Phishing, fraud, and injection checks |
 | `app/crm.py` | Mock, HubSpot, and GoHighLevel upserts |
 | `data/sample_emails.json` | 44 dev messages |
-| `data/eval_unseen.json` | 68 frozen held-out messages |
+| `data/eval_unseen.json` | 68 messages from an earlier pass. Not a fresh set |
+| `data/eval_fresh.json` | 36 messages hashed before the current rules |
+| `ci/github-actions-ci.yml` | GitHub Actions workflow (kept outside `.github/workflows`) |
 | `tests/` | Accuracy, security, webhook, and CRM tests |
 | `dashboard/` | Next.js approval desk |
 | `docker-compose.yml` | API and dashboard |

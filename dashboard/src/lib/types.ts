@@ -95,7 +95,7 @@ export type Alert = {
   created_at: string;
 };
 
-export const CATEGORIES = ["lead", "support", "invoice", "spam", "urgent", "suspicious"] as const;
+export const CATEGORIES = ["lead", "support", "invoice", "spam", "urgent", "suspicious", "review"] as const;
 
 export const CATEGORY_COLOR: Record<string, string> = {
   lead: "#1f6b45",
@@ -104,9 +104,11 @@ export const CATEGORY_COLOR: Record<string, string> = {
   spam: "#7a403c",
   urgent: "#9c3d22",
   suspicious: "#6b3fa0",
+  review: "#3d4a66",
 };
 
 export function categoryLabel(category: string) {
+  if (category === "review") return "Needs review";
   return category.slice(0, 1).toUpperCase() + category.slice(1);
 }
 

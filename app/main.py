@@ -7,6 +7,7 @@ import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -33,8 +34,22 @@ MINUTES_PER_EMAIL = 6
 PROJECTED_DAILY_VOLUME = 80
 
 
+_DEMO_SECRETS = {"", "lane-demo-token", "lane-demo-webhook", "changeme", "secret", "password"}
+
+
+def assert_runtime_secrets() -> None:
+    """A non-demo process must not boot with the published sample secrets."""
+    if _demo_enabled():
+        return
+    token = os.environ.get("API_TOKEN", "").strip()
+    secret = os.environ.get("WEBHOOK_SECRET", "").strip()
+    if token in _DEMO_SECRETS or secret in _DEMO_SECRETS or token == secret:
+        raise RuntimeError("DEMO_MODE=false requires a unique API_TOKEN and WEBHOOK_SECRET")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    assert_runtime_secrets()
     db.init_db()
     seed_if_empty()
     start_worker()
@@ -79,7 +94,9 @@ def _needs_token(request: Request) -> bool:
         return False
     if request.method != "GET":
         return True
-    return path.startswith(("/api/triage", "/api/crm", "/api/alerts"))
+    return path.startswith(
+        ("/api/triage", "/api/crm", "/api/alerts", "/api/intake", "/api/runs", "/api/stats", "/api/worker")
+    )
 
 
 @app.middleware("http")
@@ -114,8 +131,8 @@ class EmailIn(BaseModel):
 
 class TriageIn(BaseModel):
     email_id: str
-    category: str
-    confidence: float
+    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious", "review"]
+    confidence: float = Field(ge=0, le=1)
     name: str | None = None
     company: str | None = None
     budget: str | None = None
@@ -199,13 +216,13 @@ def stats() -> dict:
     emails = db.list_emails()
     triage = db.list_triage(limit=None)
     leads = db.list_leads()
-    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent", "suspicious")}
+    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")}
     approved = 0
     for item in triage:
         by_category[item["category"]] = by_category.get(item["category"], 0) + 1
         if item["approved"]:
             approved += 1
-    actionable = [item for item in triage if item["category"] not in {"spam", "suspicious"}]
+    actionable = [item for item in triage if item["category"] not in {"spam", "suspicious", "review"}]
     processed = len(triage)
     actionable_count = len(actionable)
     approved = sum(1 for item in actionable if item["approved"])
@@ -218,7 +235,7 @@ def stats() -> dict:
         "alerts": len(db.list_alerts()),
         "by_category": by_category,
         "hours_saved": round(actionable_count * MINUTES_PER_EMAIL / 60, 1),
-        "hours_saved_note": "Spam and suspicious mail are not counted. The daily figure is an assumption, not a measurement.",
+        "hours_saved_note": "Spam, suspicious, and needs-review mail are not counted. The daily figure is an assumption, not a measurement.",
         "minutes_per_email": MINUTES_PER_EMAIL,
         "projected_daily_hours": round(PROJECTED_DAILY_VOLUME * MINUTES_PER_EMAIL / 60, 1),
         "projected_daily_volume": PROJECTED_DAILY_VOLUME,
@@ -334,6 +351,9 @@ def classify(payload: EmailIn) -> dict:
 @app.post("/api/triage")
 def create_triage(payload: TriageIn) -> dict:
     email = _email_or_404(payload.email_id)
+    existing = db.get_triage_by_email(payload.email_id)
+    if existing and existing["approved"]:
+        raise HTTPException(status_code=409, detail="already approved")
     stored = save_classification(email, _classification(payload))
     return db.public_triage(
         {**stored, "subject": email["subject"], "mailbox_name": email["from_name"], "from_email": email["from_email"], "body": email["body"], "received_at": email["received_at"]},

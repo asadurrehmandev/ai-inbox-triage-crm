@@ -2,7 +2,7 @@ services:
   triage-api:
     build: .
     ports:
-      - "8741:8741"
+      - "127.0.0.1:8741:8741"
     env_file:
       - path: .env
         required: false
@@ -10,9 +10,9 @@ services:
       DATABASE_PATH: /data/triage.db
       WORKER_ENABLED: "true"
       WORKER_INTERVAL_SECONDS: "60"
-      API_TOKEN: ${API_TOKEN:-lane-demo-token}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-lane-demo-webhook}
-      DEMO_MODE: ${DEMO_MODE:-true}
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}
+      DEMO_MODE: ${DEMO_MODE:-false}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
       CORS_ORIGINS: http://127.0.0.1:8742,http://localhost:8742
     volumes:
@@ -21,11 +21,12 @@ services:
   dashboard:
     build:
       context: ./dashboard
-      args:
-        NEXT_PUBLIC_API_BASE: http://127.0.0.1:8741/api
-        NEXT_PUBLIC_API_TOKEN: ${API_TOKEN:-lane-demo-token}
     ports:
-      - "8742:8742"
+      - "127.0.0.1:8742:8742"
+    environment:
+      API_BASE_URL: http://triage-api:8741/api
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in .env}
     depends_on:
       - triage-api
 
