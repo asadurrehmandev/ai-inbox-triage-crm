@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS emails (
   subject TEXT,
   body TEXT,
   received_at TEXT,
-  status TEXT NOT NULL DEFAULT 'new'
+  status TEXT NOT NULL DEFAULT 'new',
+  message_id TEXT NOT NULL DEFAULT '',
+  in_reply_to TEXT NOT NULL DEFAULT '',
+  references_header TEXT NOT NULL DEFAULT '',
+  headers TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS triage (
@@ -163,6 +167,14 @@ def init_db() -> None:
         ):
             if column not in _columns(conn, "leads"):
                 conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {ddl}")
+        for column, ddl in (
+            ("message_id", "TEXT NOT NULL DEFAULT ''"),
+            ("in_reply_to", "TEXT NOT NULL DEFAULT ''"),
+            ("references_header", "TEXT NOT NULL DEFAULT ''"),
+            ("headers", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in _columns(conn, "emails"):
+                conn.execute(f"ALTER TABLE emails ADD COLUMN {column} {ddl}")
 
 
 def _rows(query: str, params: tuple = ()) -> list[dict]:
@@ -176,13 +188,36 @@ def _one(query: str, params: tuple = ()) -> dict | None:
     return rows[0] if rows else None
 
 
+def _header_blob(email: dict) -> str:
+    raw = email.get("headers") or ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        return json.dumps(raw)
+    return ""
+
+
 def insert_email(email: dict) -> None:
+    headers = email.get("headers") if isinstance(email.get("headers"), dict) else {}
+    in_reply_to = email.get("in_reply_to") or headers.get("In-Reply-To") or headers.get("in-reply-to") or ""
+    references = (
+        email.get("references")
+        or email.get("references_header")
+        or headers.get("References")
+        or headers.get("references")
+        or ""
+    )
+    if isinstance(in_reply_to, list):
+        in_reply_to = " ".join(str(item) for item in in_reply_to)
+    if isinstance(references, list):
+        references = " ".join(str(item) for item in references)
     with _LOCK, connect() as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO emails
-            (id, from_name, from_email, subject, body, received_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'new')
+            (id, from_name, from_email, subject, body, received_at, status,
+             message_id, in_reply_to, references_header, headers)
+            VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)
             """,
             (
                 email["id"],
@@ -191,8 +226,39 @@ def insert_email(email: dict) -> None:
                 email.get("subject"),
                 email.get("body"),
                 email.get("received_at"),
+                email.get("message_id") or "",
+                str(in_reply_to or ""),
+                str(references or ""),
+                _header_blob(email),
             ),
         )
+
+
+def thread_participants(message_ids: list[str], *, exclude_id: str = "") -> list[str]:
+    """From addresses of messages Lane has stored under these Message-IDs."""
+    cleaned: list[str] = []
+    for item in message_ids:
+        token = str(item or "").strip().strip("<>")
+        if token and token not in cleaned:
+            cleaned.append(token)
+    if not cleaned:
+        return []
+    marks = ",".join("?" * len(cleaned))
+    rows = _rows(
+        f"""
+        SELECT id, from_email FROM emails
+        WHERE id IN ({marks}) OR message_id IN ({marks})
+        """,
+        tuple([*cleaned, *cleaned]),
+    )
+    found: list[str] = []
+    for row in rows:
+        if exclude_id and row.get("id") == exclude_id:
+            continue
+        address = (row.get("from_email") or "").strip().lower()
+        if address and address not in found:
+            found.append(address)
+    return found
 
 
 def list_emails(status: str | None = None) -> list[dict]:
@@ -307,7 +373,8 @@ def get_triage(triage_id: int) -> dict | None:
     return _one(
         """
         SELECT t.*, e.subject, e.from_name AS mailbox_name, e.from_email,
-               e.body, e.received_at, e.status AS email_status
+               e.body, e.received_at, e.status AS email_status,
+               e.message_id, e.in_reply_to, e.references_header, e.headers
         FROM triage t
         JOIN emails e ON e.id = t.email_id
         WHERE t.id = ?

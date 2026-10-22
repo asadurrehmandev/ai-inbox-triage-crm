@@ -139,6 +139,24 @@ _PAYMENT_INVARIANT = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+# A change of the mailbox that receives invoices, receipts, or payments.
+# An added CC ("also cc our AP") is not this pattern.
+_INVOICE_DESTINATION = re.compile(
+    r"(?:"
+    r"\b(?:send|email|forward|direct|route|deliver)\b.{0,60}\b(?:invoices?|receipts?|payments?)\b.{0,40}\bto\b[^.\n]{0,80}(?:@|\binstead\b)"
+    r"|"
+    r"\b(?:invoices?|receipts?|payments?)\b.{0,40}\bto\b[^.\n]{0,80}\binstead\b"
+    r"|"
+    r"\b(?:new|updated|replacement)\s+billing\s+emails?\b"
+    r"|"
+    r"\bbilling\s+emails?\s+is\b"
+    r"|"
+    r"\b(?:update|change|switch)\b.{0,30}\b(?:ap|accounts\s+payable)\s+contacts?\b"
+    r"|"
+    r"\b[\w.+-]+@[\w.-]+[^.\n]{0,48}\b(?:invoice|receipt|payment)\s+delivery\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 _PAYEE_SHIFT = re.compile(
     r"\b(?:new|updated|update|change|changed|different|instead|revised|replacement)\b"
     r".{0,50}\b(?:bank\s+accounts?|accounts?(?!\s+(?:manager|executive|team|director|owner|rep))|payees?|beneficiar(?:y|ies)|routing|banks?|wallets?)\b"
@@ -376,10 +394,15 @@ def payment_related(text: str) -> bool:
 
     Wallets, crypto, payees, beneficiaries, account and routing numbers, cards,
     gift cards, store cards, claim codes, and invoices that name a new pay-to
-    all match. A product description that only says IBAN or SWIFT does not.
-    Naming an app store without a card or a code does not match.
+    all match. So does a change of where invoices, receipts, or payments are
+    sent: "send invoices to X instead", "our new billing email is", "update
+    the AP contact to". Asking to also CC accounts payable does not. A product
+    description that only says IBAN or SWIFT does not. Naming an app store
+    without a card or a code does not match.
     """
     folded = fold(text or "")
+    if _INVOICE_DESTINATION.search(folded):
+        return True
     if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(folded):
         return True
     if re.search(r"\binvoices?\b", folded, re.IGNORECASE) and re.search(

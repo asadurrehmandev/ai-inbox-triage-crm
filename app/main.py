@@ -170,6 +170,9 @@ class WebhookEmail(BaseModel):
     subject: str
     body: str
     received_at: str | None = None
+    in_reply_to: str | None = None
+    references: str | None = None
+    headers: dict[str, str | list[str]] | None = None
 
 
 class AlertIn(BaseModel):
@@ -296,11 +299,15 @@ async def ingest_email(request: Request) -> dict:
     db.insert_email(
         {
             "id": email_id,
+            "message_id": (payload.message_id or "").strip(),
             "from_name": payload.from_name,
             "from_email": payload.from_email,
             "subject": payload.subject,
             "body": payload.body,
             "received_at": payload.received_at or db.now(),
+            "in_reply_to": payload.in_reply_to or "",
+            "references": payload.references or "",
+            "headers": payload.headers or {},
         }
     )
     return {"id": email_id, "status": "queued"}

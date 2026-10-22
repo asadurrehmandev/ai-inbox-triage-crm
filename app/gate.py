@@ -2,18 +2,21 @@
 
 Stored flags and the model's category are not enough. The message is read
 again. A suspicious row cannot become a lead. Money movement, including a
-store card or a claim code, is refused. A first contact that carries a risk
-feature needs a second confirm, and that confirm is logged.
+store card, a claim code, or a change of where invoices are sent, is refused.
+Without a DKIM pass aligned to From, the sender is a first contact. A subject
+of "Re:" is not a thread. A first contact that carries a risk feature needs a
+second confirm, and that confirm is logged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from app.classifier import existing_thread, known_sender
+from app.classifier import known_sender
 from app.normalize import open_channels
 from app.prepare import strip_quotes
 from app.risk import assess_risk, hard_flags, payment_related
@@ -45,6 +48,47 @@ _FILE = re.compile(
 _CALENDAR = re.compile(r"BEGIN:VCALENDAR|text/calendar|METHOD:REQUEST|\.ics\b", re.IGNORECASE)
 _VOICEMAIL = re.compile(r"\bvoice[\s-]?mails?\b", re.IGNORECASE)
 _ATTACHMENT_HEADER = re.compile(r"content-disposition:\s*attachment", re.IGNORECASE)
+_QR_WORD = re.compile(r"\bqr(?:\s*-?\s*codes?)?\b", re.IGNORECASE)
+_MEETING_STARTING = re.compile(
+    r"\bmeetings?\b(?:\s+\w+){0,4}\s+start(?:ing|s)\b",
+    re.IGNORECASE,
+)
+_QUOTA = re.compile(
+    r"\b(?:mail\s*box|inbox|storage)\b.{0,40}\b(?:quota|full|limit)\b"
+    r"|\bquota\b.{0,30}\b(?:exceeded|reached|full|warning)\b"
+    r"|\bstorage\s+(?:quota|is\s+full|full|limit)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_LOGIN_PATH = re.compile(r"(?:login|log-in|signin|sign-in|sign_in|/sso\b|password)", re.IGNORECASE)
+_FORM = re.compile(r"<\s*form\b", re.IGNORECASE)
+_CHECKOUT_WORD = re.compile(r"\bcheckout\b", re.IGNORECASE)
+_ADDENDUM = re.compile(
+    r"\bpayment\s+addend(?:um|a)\b"
+    r"|\baddend(?:um|a)\b.{0,40}\bpayments?\b"
+    r"|\bpayment\s+instructions\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_CHANGED_TERMS = re.compile(
+    r"\b(?:updated|revised|changed|new)\s+terms\b"
+    r"|\bterms\b.{0,30}\b(?:changed|updated|revised)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_CC_AP = re.compile(
+    r"\bcc\b.{0,50}\b(?:ap@|ap\b|a/p\b|accounts\s+payable)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOCUMENT = re.compile(r"\b(?:receipts?|invoices?|paid\s+inv|inv\s*#\s*\d+)\b", re.IGNORECASE)
+_DKIM_PASS = re.compile(r"\bdkim\s*=\s*pass\b([^;]*)", re.IGNORECASE)
+_HEADER_D = re.compile(r"\bheader\.d\s*=\s*([^\s;]+)", re.IGNORECASE)
+_HEADER_I = re.compile(r"\bheader\.i\s*=\s*([^\s;]+)", re.IGNORECASE)
+_SPF = re.compile(r"\bspf\s*=\s*(pass|fail|softfail|neutral|none)\b", re.IGNORECASE)
+_DMARC = re.compile(r"\bdmarc\s*=\s*(pass|fail|none)\b", re.IGNORECASE)
+_MSG_ID = re.compile(r"<([^<>\s]+)>")
+_AUTH_HEADERS = {
+    "authentication-results",
+    "arc-authentication-results",
+    "authentication-results-original",
+}
 
 
 class FilingBlocked(Exception):
@@ -85,6 +129,162 @@ def _host(url: str) -> str:
     return host
 
 
+def _domain_of(token: str) -> str:
+    token = token.strip().strip("<>").strip(".").lower()
+    if "@" in token:
+        token = token.rsplit("@", 1)[1]
+    return token.removeprefix("www.").strip(".")
+
+
+def _aligned(signing: str, sender: str) -> bool:
+    signing = _domain_of(signing)
+    sender = _domain_of(sender)
+    if not signing or not sender or "@" in signing:
+        return False
+    return signing == sender or sender.endswith("." + signing) or signing.endswith("." + sender)
+
+
+def _header_pairs(email: dict) -> list[tuple[str, str]]:
+    raw = email.get("headers") or {}
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raw = {}
+        else:
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
+                raw = {}
+    pairs: list[tuple[str, str]] = []
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            values = value if isinstance(value, list) else [value]
+            for item in values:
+                pairs.append((str(key).lower(), str(item)))
+    for key in ("authentication_results", "auth_results"):
+        if email.get(key):
+            pairs.append(("authentication-results", str(email[key])))
+    return pairs
+
+
+def _auth_blobs(email: dict) -> list[str]:
+    return [value for name, value in _header_pairs(email) if name in _AUTH_HEADERS]
+
+
+def authentication(email: dict) -> dict:
+    """DKIM, SPF, and DMARC as the mailbox reported them. Only aligned DKIM is trusted."""
+    blobs = "\n".join(_auth_blobs(email))
+    spf_blobs = [blobs]
+    spf_blobs.extend(value for name, value in _header_pairs(email) if name == "received-spf")
+    spf_text = "\n".join(spf_blobs)
+    dkim = "pass" if _DKIM_PASS.search(blobs) else "none"
+    spf = _SPF.search(spf_text)
+    if spf is None:
+        for value in spf_blobs[1:]:
+            leading = re.match(r"\s*(pass|fail|softfail|neutral|none)\b", value, re.IGNORECASE)
+            if leading:
+                spf_value = leading.group(1).lower()
+                break
+        else:
+            spf_value = "none"
+    else:
+        spf_value = spf.group(1).lower()
+    dmarc = _DMARC.search(blobs)
+    return {
+        "dkim": dkim,
+        "spf": spf_value,
+        "dmarc": dmarc.group(1).lower() if dmarc else "none",
+        "aligned": sender_authenticated(email),
+    }
+
+
+def dkim_domains(email: dict) -> list[str]:
+    found: list[str] = []
+    for blob in _auth_blobs(email):
+        for match in _DKIM_PASS.finditer(blob):
+            rest = match.group(1) or ""
+            domain = _HEADER_D.search(rest) or _HEADER_I.search(rest)
+            if domain is None:
+                continue
+            host = _domain_of(domain.group(1))
+            if host and host not in found:
+                found.append(host)
+    return found
+
+
+def _sender_domain(email: dict) -> str:
+    address = email.get("from_email") or ""
+    if "@" not in address:
+        return ""
+    return _domain_of(address.rsplit("@", 1)[1])
+
+
+def sender_authenticated(email: dict) -> bool:
+    """True only for dkim=pass whose signing domain aligns with From."""
+    sender = _sender_domain(email)
+    if not sender:
+        return False
+    return any(_aligned(domain, sender) for domain in dkim_domains(email))
+
+
+def _message_ids(value: str) -> list[str]:
+    found: list[str] = []
+    for token in _MSG_ID.findall(value or ""):
+        token = token.strip()
+        if token and token not in found:
+            found.append(token)
+    return found
+
+
+def referenced_ids(email: dict) -> list[str]:
+    chunks = [
+        str(email.get("in_reply_to") or ""),
+        str(email.get("references") or ""),
+        str(email.get("references_header") or ""),
+    ]
+    for name, value in _header_pairs(email):
+        if name in {"in-reply-to", "references"}:
+            chunks.append(value)
+    found: list[str] = []
+    for chunk in chunks:
+        for token in _message_ids(chunk):
+            if token not in found:
+                found.append(token)
+    return found
+
+
+def trusted_thread(email: dict) -> bool:
+    """A thread Lane has stored, from a prior participant, with aligned DKIM.
+
+    A subject that starts with Re: is not enough. In-Reply-To or References
+    has to name a Message-ID this mailbox already kept.
+    """
+    if not sender_authenticated(email):
+        return False
+    ids = referenced_ids(email)
+    if not ids:
+        return False
+    from app import db
+
+    participants = db.thread_participants(ids, exclude_id=str(email.get("id") or ""))
+    sender = (email.get("from_email") or "").strip().lower()
+    return bool(sender) and sender in participants
+
+
+def gate_first_contact(email: dict, known_contacts: list[dict] | None) -> bool:
+    """Unauthenticated mail is a first contact, even when the CRM knows the address."""
+    if not sender_authenticated(email):
+        return True
+    if trusted_thread(email) or known_sender(email, known_contacts):
+        return False
+    return True
+
+
+def is_receipt_or_invoice(email: dict) -> bool:
+    """A receipt or an invoice is never auto-filed, whatever the model called it."""
+    return bool(_DOCUMENT.search(_readable(email)))
+
+
 def _same_org(host: str, sender_domain: str) -> bool:
     host = host.lower().strip(".").removeprefix("www.")
     sender = sender_domain.lower().strip(".").removeprefix("www.")
@@ -107,14 +307,50 @@ def _dedupe(reasons: list[str]) -> list[str]:
     return found
 
 
+def _qr(raw: str) -> bool:
+    if _QR_WORD.search(raw):
+        return True
+    for image in _IMG.finditer(raw):
+        blob = image.group(1) or ""
+        src = _SRC.search(blob)
+        alt = re.search(r"\balt\s*=\s*[\"']([^\"']+)[\"']", blob, re.IGNORECASE)
+        haystack = " ".join(
+            part for part in (src.group(1) if src else "", alt.group(1) if alt else "") if part
+        )
+        if _QR_WORD.search(haystack):
+            return True
+    return False
+
+
+def _login_or_form(raw: str) -> bool:
+    if _FORM.search(raw):
+        return True
+    for match in _URL.finditer(raw):
+        parsed = urlparse(match.group(0).strip().rstrip(").,>"))
+        target = f"{parsed.path or ''}?{parsed.query or ''}"
+        if _LOGIN_PATH.search(target):
+            return True
+    return False
+
+
+def _checkout(raw: str) -> bool:
+    urls = list(_URL.finditer(raw))
+    if any(_CHECKOUT_WORD.search(match.group(0)) for match in urls):
+        return True
+    return bool(urls) and bool(_CHECKOUT_WORD.search(raw))
+
+
 def risk_features(email: dict, known_contacts: list[dict] | None = None) -> list[str]:
-    """Structural features that make a first contact unsafe to file in one click."""
+    """Structural features that make a first contact unsafe to file in one click.
+
+    A link or image on the From domain counts only when DKIM did not pass for
+    that domain. A cid: part with no QR in the name does not count. There is
+    no image reader.
+    """
     raw = f"{email.get('subject') or ''}\n{email.get('body') or ''}"
     readable = _readable(email)
-    sender = ""
-    address = email.get("from_email") or ""
-    if "@" in address:
-        sender = address.rsplit("@", 1)[1].lower().strip().rstrip(">")
+    sender = _sender_domain(email)
+    authed = sender_authenticated(email)
     reasons: list[str] = []
     if "xn--" in sender:
         reasons.append("punycode host")
@@ -128,32 +364,58 @@ def risk_features(email: dict, known_contacts: list[dict] | None = None) -> list
             reasons.append("punycode host")
         elif not _same_org(host, sender):
             reasons.append("link to an unknown domain")
-    image_off_domain = False
+        elif not authed:
+            reasons.append("link on an unauthenticated domain")
     for image in _IMG.finditer(raw):
         src = _SRC.search(image.group(1) or "")
         if src is None:
-            image_off_domain = True
             continue
         value = src.group(1).strip()
-        if value.lower().startswith(("cid:", "data:")):
-            image_off_domain = True
+        lowered = value.lower()
+        if lowered.startswith("data:"):
+            reasons.append("inline image")
             continue
-        if value.lower().startswith("http"):
-            if not _same_org(_host(value), sender):
-                image_off_domain = True
-        else:
-            image_off_domain = True
-    if image_off_domain or re.search(r"\bcid:", raw, re.IGNORECASE):
-        reasons.append("image or QR on an unknown domain")
+        if lowered.startswith("cid:"):
+            continue
+        if lowered.startswith("http"):
+            host = _host(value)
+            if not _same_org(host, sender):
+                reasons.append("image on an unknown domain")
+            elif not authed:
+                reasons.append("image on an unauthenticated domain")
     if _CALENDAR.search(raw):
         reasons.append("calendar invite")
     if _ATTACHMENT_HEADER.search(raw) or _FILE.search(readable):
         reasons.append("attachment")
-    if _VOICEMAIL.search(readable):
-        reasons.append("voicemail notice")
     flags = assess_risk(email, readable, email.get("body") or "", known_contacts)
     if {"lookalike_domain", "brand_impersonation", "display_name_mismatch", "mismatched_link"} & set(flags):
         reasons.append("brand and domain do not match")
+    return _dedupe(reasons)
+
+
+def always_confirm_features(email: dict) -> list[str]:
+    """Features that need a second confirm even for an authenticated sender."""
+    raw = f"{email.get('subject') or ''}\n{email.get('body') or ''}"
+    readable = _readable(email)
+    reasons: list[str] = []
+    if _qr(raw):
+        reasons.append("QR code")
+    if _MEETING_STARTING.search(readable):
+        reasons.append("meeting starting")
+    if _VOICEMAIL.search(readable):
+        reasons.append("voicemail notice")
+    if _QUOTA.search(readable):
+        reasons.append("quota or storage notice")
+    if _login_or_form(raw):
+        reasons.append("login or form link")
+    if _checkout(raw):
+        reasons.append("checkout link")
+    if _ADDENDUM.search(readable):
+        reasons.append("payment addendum")
+    if _CHANGED_TERMS.search(readable):
+        reasons.append("changed terms")
+    if _CC_AP.search(readable) and not payment_related(readable):
+        reasons.append("also copy accounts payable")
     return _dedupe(reasons)
 
 
@@ -192,16 +454,19 @@ def evaluate_filing(
             message="blocked: verify by phone or security review",
             reasons=blocking,
         )
-    features = risk_features(email, known_contacts)
-    first_contact = not known_sender(email, known_contacts) and not existing_thread(email)
-    if first_contact and features:
+    features: list[str] = []
+    if gate_first_contact(email, known_contacts):
+        features.extend(risk_features(email, known_contacts))
+    features.extend(always_confirm_features(email))
+    features = _dedupe(features)
+    if features:
         if confirmed:
             return FilingDecision(allow=True, code="confirmed", reasons=features)
         return FilingDecision(
             allow=False,
             needs_confirm=True,
             code="confirm",
-            message="Needs a second confirm before this first-contact message can be filed",
+            message="Needs a second confirm before this message can be filed",
             reasons=features,
         )
     return FilingDecision(allow=True)

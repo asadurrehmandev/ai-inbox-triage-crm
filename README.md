@@ -20,7 +20,7 @@ Lane is a human-in-the-loop desk with a small Python worker behind it.
 2. The message is normalized before any rule runs: zero-width and bidi characters are stripped, off-screen and hidden HTML is dropped, and base64, quoted-printable, and HTML-entity runs are decoded. Concealed prose is flagged. This is not a list of attack phrases.
 3. Claude (or, with no key, the rules demo) suggests **lead, support, invoice, spam, urgent, suspicious, or needs review**, and extracts **name, company, budget, and intent**. Urgent requires a known sender or an existing reply thread, plus an outage or a deadline. A first contact does not jump the queue.
 4. It writes a draft in Asad's voice. It does not send it.
-5. Nothing reaches the CRM until the server filing gate says yes. The button is not the gate. The rules demo never files on its own. Claude mode may file a lead, and it passes the same gate, reading the message again rather than trusting the model's label. The gate refuses a suspicious message promoted to a lead, even when the stored flags are empty. It refuses money movement — wallets, crypto, payees, beneficiaries, account or routing numbers, cards, gift cards, store cards, claim codes, and "update our details" — with **payment-related: verify by phone**. A second confirm does not override that. A first contact that carries a link or QR to an unknown domain, a shortened link, a calendar invite, an attachment, a voicemail notice, or a brand/domain mismatch stays unfiled until the person confirms a second time with those reasons on screen. That confirm is logged. A lead with none of those is one click: **Accept and file in CRM**.
+5. Nothing reaches the CRM until the server filing gate says yes. The button is not the gate. The rules demo never files on its own. Claude mode may file a lead, and only a lead: a receipt or an invoice is never auto-filed, and the gate reads the message again rather than trusting the model's label. The gate refuses a suspicious message promoted to a lead, even when the stored flags are empty. It refuses money movement — wallets, crypto, payees, beneficiaries, account or routing numbers, cards, gift cards, store cards, claim codes, "update our details", and a change of where invoices, receipts, or payments are sent — with **payment-related: verify by phone**. A second confirm does not override that. Without `dkim=pass` aligned to the From domain, the sender is a first contact, so a link on that domain still needs a second confirm. A subject of "Re:" is not a thread. QR codes, "meeting starting", voicemail, quota or storage notices, and login or form links always need that confirm. The confirm is logged. A lead with none of those is one click: **Accept and file in CRM**.
 6. A person opens the dashboard, edits the draft if they want, and approves it. Spam is stored and not announced. Other mail gets a Slack-style alert.
 
 Hours returned are counted at six minutes a message: read, label, CRM entry, first reply. Spam and suspicious mail are left out of that count. The dashboard shows the total for the mailbox in front of you. The "8.0 hours" figure is the same rate on an assumed 80-message day. It is an assumption, not a measurement.
@@ -82,7 +82,7 @@ flowchart LR
 - **Webhook ingest.** `POST /api/webhooks/email` queues one message. The body must carry `X-Lane-Signature: sha256=<hmac of the raw body>` using `WEBHOOK_SECRET`. The same `message_id` (or the same sender, subject, time, and body) returns `duplicate` instead of queueing a second copy. The worker picks it up on the next pass, or immediately if you call `POST /api/worker/run`.
 - **Scheduler.** APScheduler polls on `WORKER_INTERVAL_SECONDS` (60 by default). The Worker page shows the next run and the log of passes.
 - **Mock mailbox.** Forty-four labeled messages stand in for IMAP. Eight stay unseen so Run worker has something to do.
-- **CRM adapter.** The rules demo does not write the CRM. A person accepts the lead first. Claude mode can file a lead, and both paths use the same server gate: money movement (including a store card or a claim code) is refused, a suspicious row cannot become a lead, and a first contact with a link, QR, calendar invite, attachment, shortened link, voicemail notice, or brand/domain mismatch needs a logged second confirm. The card says "payment-related: verify by phone" for the money case. Set `HUBSPOT_TOKEN` and an accepted contact is upserted by email. Lane creates the contact properties `lane_budget` and `lane_intent` (string fields on the contact object). If the portal rejects them, the budget and intent go into a note associated with that contact. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact with those two custom fields, or puts the same text on `source` if the location rejects custom fields. A remote failure is stored on the lead and shown in the CRM table.
+- **CRM adapter.** The rules demo does not write the CRM. A person accepts the lead first. Claude mode can file a lead, and only a lead: receipts and invoices are not auto-filed. Both paths use the same server gate. Money movement, including a store card, a claim code, or a new invoice or billing address, is refused. A suspicious row cannot become a lead. A link on the From domain is not trusted unless Authentication-Results (or an ARC result) reports `dkim=pass` aligned with From. The card says "payment-related: verify by phone" for the money case. Set `HUBSPOT_TOKEN` and an accepted contact is upserted by email. Lane creates the contact properties `lane_budget` and `lane_intent` (string fields on the contact object). If the portal rejects them, the budget and intent go into a note associated with that contact. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact with those two custom fields, or puts the same text on `source` if the location rejects custom fields. A remote failure is stored on the lead and shown in the CRM table.
 - **Mock Slack.** Alerts render in the dashboard. `SLACK_WEBHOOK_URL` also posts them.
 - **Approve or edit.** The draft is a real textarea. Approve marks the lead "Reply approved" and posts a second alert. Nothing is emailed until you connect a sender.
 - **Measured accuracy.** The rule engine is a conservative demo, not a claim about Claude, and not a phishing detector. Low-confidence mail goes to **needs review**. A first-contact outage or deadline goes to review as well: urgent now requires a known sender or a reply thread. `pytest` prints the rates. None of these files is a sealed holdout.
@@ -115,18 +115,29 @@ flowchart LR
 
 ## Limitations
 
-The rules demo does not catch phishing. It refuses to file mail, and it refuses to call a stranger urgent. These families still get through as ordinary mail unless they also trip the payment rule, a concealed-text flag, or the first-contact confirm:
+The rules demo does not catch phishing. It refuses to file mail, and it refuses to call a stranger urgent. Lane does not read images. A `cid:` part, and an image hosted on the sender's domain, do not by themselves require a confirm.
 
-- QR codes and image-only messages. There is no image reader. A first contact that references an image or a `cid:` part is not filed until a person confirms. The picture itself is not read.
-- Cousin domains that are not a known brand with a swapped character (`northwind-logistics.co` next to a real `northwindlogistics.com`). A link to a domain other than the sender's still needs a second confirm on a first contact.
-- A reply-chain hijack that quotes a real thread and then asks for ordinary-looking work. An existing thread skips the second confirm.
-- Calendar invites are not parsed. A first contact that includes one is not filed until a person confirms, and the reason shown is "calendar invite".
-- Polite payee changes, store cards, and claim codes are blocked from the CRM and show the phone banner. A second confirm does not override that. They are not reliably marked suspicious.
-- Crypto and wallet notes are blocked from the CRM the same way. A message that never uses those words is not.
-- Changing where invoices are paid can trip the same banner. "Use the new account for invoices" is refused even when the sender is a real customer. Verify that one by phone.
-- A row already marked suspicious cannot be accepted as a lead, including when its stored flags are empty.
+A second confirm, with the reasons on screen and a row in the filing log, is required when Accept would file a lead and any of these are true:
+
+- The message has no `dkim=pass` aligned with the From domain (SPF or DMARC alone is not enough), and it contains a shortened link, a punycode host, a link or image on some other domain, a link or image on the From domain, an inline `data:` image, a calendar invite, an attachment filename or `Content-Disposition: attachment`, or a brand/domain mismatch.
+- Any of these, whatever the domain and even when DKIM passes: the word QR or an image `src` or `alt` that says `qr` (including a `cid:` name that contains `qr`); "meeting starting"; a voicemail notice; a mailbox quota or storage notice; an HTML form or a URL path for login or sign-in; a checkout link; a payment addendum; changed terms; an added CC to AP or accounts payable.
+
+A thread is trusted only when `In-Reply-To` or `References` names a Message-ID Lane has stored, the sender is a prior participant on that message, and DKIM passes aligned with From. A subject of `Re:` is not a thread. Checkout links, payment addenda, and changed terms inside a trusted thread still need the confirm.
+
+These are phone-blocked. Confirm does not file them:
+
+- Polite payee changes, store cards, claim codes, wallets, and crypto. They are not reliably marked suspicious.
+- Changing where invoices, receipts, or payments are sent. "Send invoices to accounts@fieldnote.test instead", "our new billing email is", and "update the AP contact to" are refused. "Please also cc our AP" is the soft confirm above, not this banner.
+- A row already marked suspicious, including when its stored flags are empty.
+
+These still get through as ordinary mail unless they also trip a rule above:
+
+- Cousin domains that are not a known brand with a swapped character (`northwind-logistics.co` next to a real `northwindlogistics.com`).
+- A reply that quotes a real thread and then asks for ordinary work, with no new link and no stored Message-ID to check.
+- Calendar invites are not parsed. The confirm reason is the text "calendar invite", not the event.
 - Non-English outages that do not use an English outage or deadline word (the German sample stays in review).
 - Instructions a person can read in the normal text. Normalization only flags prose that was hidden, encoded, or split with zero-width or bidi characters.
+- A picture that does not say QR. Lane cannot see a code drawn in an image.
 
 Chasing each of those with another phrase list is the arms race this desk stops playing. Claude is the classifier. A person accepts the lead. Payment mail is verified by phone.
 

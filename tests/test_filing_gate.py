@@ -55,7 +55,8 @@ def test_store_cards_and_claim_codes_are_money_movement():
     assert payment_related("Please buy an app store gift card for the raffle.") is True
     assert payment_related("Our app store listing goes live on Monday.") is False
     assert payment_related("Please use the new account for invoices.") is True
-    assert payment_related("Please send future invoices to accounts@fieldnote.test instead.") is False
+    assert payment_related("Please send future invoices to accounts@fieldnote.test instead.") is True
+    assert payment_related("please also cc our AP") is False
 
 
 def test_accept_cannot_promote_suspicious_even_when_flags_are_empty(client):
@@ -195,7 +196,7 @@ def test_unknown_domain_confirms_and_a_known_sender_does_not(client):
             "status": "Reply pending",
         }
     )
-    known = _park(
+    known_unauthed = _park(
         {
             "id": "gate-known-link",
             "from_name": "Sam Idris",
@@ -207,13 +208,35 @@ def test_unknown_domain_confirms_and_a_known_sender_does_not(client):
             ),
         }
     )
+    still = _accept(client, known_unauthed["id"], confirm=False)
+    assert still.status_code == 409
+    assert still.json()["detail"]["code"] == "confirm"
+    assert "gate-known-link" not in _crm_ids(client)
+    known = _park(
+        {
+            "id": "gate-known-dkim",
+            "from_name": "Sam Idris",
+            "from_email": "sam@harborandco.test",
+            "subject": "updated brief again",
+            "body": (
+                "Hi Asad,\n\nThe revised brief is at https://files.northwind-archive.test/brief\n\n"
+                "Sam Idris\nHarbor and Co\n"
+            ),
+            "headers": {
+                "Authentication-Results": (
+                    "mx.lane.test; dkim=pass header.d=harborandco.test header.i=@harborandco.test; "
+                    "spf=pass smtp.mailfrom=sam@harborandco.test; dmarc=pass header.from=harborandco.test"
+                )
+            },
+        }
+    )
     accepted = _accept(client, known["id"], confirm=False)
     assert accepted.status_code == 200
-    assert "gate-known-link" in _crm_ids(client)
-    assert all(item["email_id"] != "gate-known-link" for item in db.list_filing_log())
+    assert "gate-known-dkim" in _crm_ids(client)
+    assert all(item["email_id"] != "gate-known-dkim" for item in db.list_filing_log())
 
 
-def test_same_org_link_and_a_reply_thread_skip_the_second_confirm(client):
+def test_same_org_link_and_a_reply_subject_still_need_confirm_without_auth(client):
     same_org = _park(
         {
             "id": "gate-same-org",
@@ -226,8 +249,10 @@ def test_same_org_link_and_a_reply_thread_skip_the_second_confirm(client):
             ),
         }
     )
-    assert _accept(client, same_org["id"]).status_code == 200
-    assert "gate-same-org" in _crm_ids(client)
+    same = _accept(client, same_org["id"])
+    assert same.status_code == 409
+    assert "link on an unauthenticated domain" in same.json()["detail"]["reasons"]
+    assert "gate-same-org" not in _crm_ids(client)
 
     thread = _park(
         {
@@ -238,8 +263,10 @@ def test_same_org_link_and_a_reply_thread_skip_the_second_confirm(client):
             "body": "The short version is https://bit.ly/fieldnote-brief\n\nAda Field\n",
         }
     )
-    assert _accept(client, thread["id"], confirm=False).status_code == 200
-    assert "gate-thread" in _crm_ids(client)
+    reply = _accept(client, thread["id"], confirm=False)
+    assert reply.status_code == 409
+    assert "shortened link" in reply.json()["detail"]["reasons"]
+    assert "gate-thread" not in _crm_ids(client)
 
 
 def test_short_link_voicemail_and_filename_need_confirm_bare_attached_does_not(client):
@@ -400,7 +427,7 @@ def test_store_card_and_claim_code_block_accept_and_a_fooled_claude(client):
     )
     image_outcome = apply_policy(image, insisted)
     assert image_outcome["lead"] is None
-    assert "image or QR on an unknown domain" in image_outcome["triage"]["reasons"]
+    assert "QR code" in image_outcome["triage"]["reasons"]
     image_row = db.get_triage_by_email("gate-qr")
     assert image_row is not None
     image_refused = _accept(client, image_row["id"])

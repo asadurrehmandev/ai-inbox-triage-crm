@@ -5,7 +5,7 @@ from __future__ import annotations
 from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email
-from app.gate import evaluate_filing, log_confirmed_filing
+from app.gate import evaluate_filing, is_receipt_or_invoice, log_confirmed_filing
 from app.normalize import open_channels
 from app.prepare import html_to_text, strip_quotes
 from app.risk import hard_flags
@@ -114,10 +114,14 @@ def apply_policy(email: dict, result: Classification, known_contacts: list[dict]
             result.risk_flags = list(dict.fromkeys([*result.risk_flags, *extra]))
         elif decision.needs_confirm:
             result.reasons = list(dict.fromkeys([*result.reasons, *decision.reasons]))
+    # A receipt or an invoice is never auto-filed, even when the model said lead.
+    receipt = is_receipt_or_invoice(email)
+    if receipt and result.category == "lead" and not _rules_mode(result):
+        result.reasons = list(dict.fromkeys([*result.reasons, "receipts and invoices are not auto-filed"]))
     triage = save_classification(email, result)
     lead = None
     alert = None
-    if not _rules_mode(result) and result.category == "lead":
+    if not _rules_mode(result) and result.category == "lead" and not receipt:
         filed = evaluate_filing(
             email,
             current_category=result.category,
@@ -154,6 +158,10 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
         "from_name": row.get("mailbox_name") or row.get("from_name"),
         "subject": row.get("subject"),
         "body": row.get("body") or "",
+        "message_id": row.get("message_id") or "",
+        "in_reply_to": row.get("in_reply_to") or "",
+        "references": row.get("references_header") or row.get("references") or "",
+        "headers": row.get("headers") or "",
     }
     decision = evaluate_filing(
         email,

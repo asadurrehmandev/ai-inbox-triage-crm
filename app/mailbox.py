@@ -83,14 +83,31 @@ def parse_message(raw: bytes, uid: str, uidvalidity: str) -> dict:
     message_id = _header(parsed.get("Message-Id")).strip().strip("<>")
     if not message_id:
         message_id = f"imap-{uidvalidity}-{uid}"
+    def _all(name: str) -> list[str]:
+        return [_header(item) for item in (parsed.get_all(name) or []) if item]
+
+    auth = _all("Authentication-Results")
+    arc = _all("ARC-Authentication-Results")
+    received_spf = _all("Received-SPF")
+    headers: dict[str, str | list[str]] = {}
+    if auth:
+        headers["Authentication-Results"] = auth if len(auth) > 1 else auth[0]
+    if arc:
+        headers["ARC-Authentication-Results"] = arc if len(arc) > 1 else arc[0]
+    if received_spf:
+        headers["Received-SPF"] = received_spf if len(received_spf) > 1 else received_spf[0]
     return {
         "id": message_id,
+        "message_id": message_id,
         "from_name": sender[0],
         "from_email": sender[1],
         "subject": _header(parsed.get("Subject")),
         "body": message_body(parsed),
         "received_at": normalize_date(_header(parsed.get("Date"))),
         "auto_submitted": _header(parsed.get("Auto-Submitted")),
+        "in_reply_to": _header(parsed.get("In-Reply-To")),
+        "references": _header(parsed.get("References")),
+        "headers": headers,
         "imap_uid": uid,
         "status": "new",
     }
