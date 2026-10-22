@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from app.normalize import split_html
+from app.normalize import open_channels
 
 _FORWARD = re.compile(
     r"(?:-{5,}\s*Forwarded message\s*-{5,}|-----Original Message-----)",
@@ -20,15 +20,13 @@ _QUOTE_SPLIT = re.compile(r"\nOn .{0,180} wrote:\s*\n", re.IGNORECASE)
 
 
 def html_to_text(value: str) -> str:
-    """Visible text only. White-on-white, 1px, and comments are not included."""
-    visible, _hidden = split_html(value or "")
-    return visible
+    """Visible text only. Hidden, off-screen, white, and tiny type are not included."""
+    return open_channels(value or "").visible
 
 
 def hidden_text(value: str) -> str:
-    """Text a reader does not see: comments, white ink, tiny type, display:none."""
-    _visible, hidden = split_html(value or "")
-    return hidden
+    """Text recovered from hiding or from an encoded channel, not the visible reading."""
+    return open_channels(value or "").concealed
 
 
 def unwrap_forward(email: dict) -> dict:

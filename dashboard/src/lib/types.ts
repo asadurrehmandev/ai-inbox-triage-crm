@@ -119,7 +119,7 @@ export function modeLabel(mode: string) {
   if (mode === "anthropic") return "Claude";
   if (mode === "openai") return "OpenAI";
   if (mode === "rules-fallback") return "Rules fallback";
-  return "Rules · no API key";
+  return "Rules demo · no API key";
 }
 
 export function cadence(seconds: number) {

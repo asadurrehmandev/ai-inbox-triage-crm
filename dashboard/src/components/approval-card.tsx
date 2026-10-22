@@ -16,12 +16,14 @@ export function ApprovalCard({
   onSave,
   onApprove,
   onAccept,
+  inCrm = false,
 }: {
   item: Triage;
   busy: boolean;
   onSave: (draft: string) => Promise<void>;
   onApprove: () => Promise<void>;
   onAccept?: (category: string) => Promise<void>;
+  inCrm?: boolean;
 }) {
   const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
   const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
@@ -41,6 +43,7 @@ export function ApprovalCard({
 
   const dirty = draft !== item.draft_reply;
   const color = CATEGORY_COLOR[item.category] ?? "#1c1915";
+  const payment = (item.risk_flags || []).includes("payment_related");
 
   return (
     <article className="flex min-h-full flex-col">
@@ -65,6 +68,11 @@ export function ApprovalCard({
         {item.llm_error ? (
           <p className="mt-2 text-xs text-muted-foreground">Rules fallback: {item.llm_error}</p>
         ) : null}
+        {payment ? (
+          <p className="mt-3 border border-border bg-card px-3 py-2 text-sm" role="status">
+            payment-related: verify by phone
+          </p>
+        ) : null}
         {item.reasons && item.reasons.length > 0 ? (
           <p className="mt-3 text-sm text-muted-foreground">
             {item.category === "review" && item.suggested_category
@@ -73,7 +81,7 @@ export function ApprovalCard({
             {item.reasons.join(" · ")}
           </p>
         ) : null}
-        {item.category === "review" && item.suggested_category && onAccept ? (
+        {!payment && item.category === "review" && item.suggested_category && onAccept ? (
           <div className="mt-3">
             <Button
               type="button"
@@ -81,6 +89,13 @@ export function ApprovalCard({
               onClick={() => void onAccept(item.suggested_category || "")}
             >
               Accept as {item.suggested_category}
+            </Button>
+          </div>
+        ) : null}
+        {!payment && item.category === "lead" && !inCrm && onAccept ? (
+          <div className="mt-3">
+            <Button type="button" disabled={busy || item.approved} onClick={() => void onAccept("lead")}>
+              Accept and file in CRM
             </Button>
           </div>
         ) : null}
@@ -122,9 +137,11 @@ export function ApprovalCard({
         {item.category === "spam" || item.category === "suspicious" || item.category === "review" ? (
           <p className="text-sm text-muted-foreground">
             {item.category === "suspicious"
-              ? "Flagged before classification. Do not pay, do not reply, and do not write this to the CRM."
+              ? "Held for a person. Do not pay, do not reply, and do not write this to the CRM."
               : item.category === "review"
-                ? "Not confident enough to file. Nothing was written to the CRM."
+                ? payment
+                  ? "payment-related: verify by phone. Nothing was written to the CRM."
+                  : "A person has to accept this before it can be filed. Nothing was written to the CRM."
                 : "Spam is not answered and is not written to the CRM."}
           </p>
         ) : null}

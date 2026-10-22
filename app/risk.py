@@ -11,8 +11,7 @@ from __future__ import annotations
 import os
 import re
 
-from app.normalize import fold
-from app.prepare import hidden_text
+from app.normalize import fold, open_channels
 
 _BRANDS: dict[str, tuple[str, ...]] = {
     "microsoft": ("microsoft.com", "office.com", "office365.com", "live.com", "outlook.com"),
@@ -125,6 +124,26 @@ _DANGEROUS_FILE = re.compile(
 _HIDDEN_INSTRUCTION = re.compile(
     r"\b(ignore|disregard|assistant|model|crm|budget|qualified|classify|override)\b",
     re.IGNORECASE,
+)
+# Money movement and payee changes. A project that merely mentions an IBAN is not
+# one of these: the words have to be a rail, a payee, or a request to change where
+# money goes.
+_PAYMENT_INVARIANT = re.compile(
+    r"\b("
+    r"wallets?|crypto(?:currency)?|usdt|tether|bitcoin|btc|ethereum|"
+    r"payees?|beneficiar(?:y|ies)|gift\s*cards?|"
+    r"routing\s+numbers?|account\s+numbers?|bank\s+accounts?|"
+    r"card\s+numbers?|credit\s+cards?|debit\s+cards?|"
+    r"update\s+our\s+details|pay(?:able)?\s+to|remit\s+to"
+    r")\b",
+    re.IGNORECASE,
+)
+_PAYEE_SHIFT = re.compile(
+    r"\b(?:new|updated|update|change|changed|different|instead|revised|replacement)\b"
+    r".{0,50}\b(?:bank\s+accounts?|accounts?(?!\s+(?:manager|executive|team|director|owner|rep))|payees?|beneficiar(?:y|ies)|routing|banks?|wallets?)\b"
+    r"|"
+    r"\b(?:payees?|wallets?|beneficiar(?:y|ies))\b.{0,40}\b(?:instead|updated|changed)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -351,12 +370,32 @@ def _untrusted_challenge(text: str, sender: str) -> bool:
     return True
 
 
+def payment_related(text: str) -> bool:
+    """True when the text is about moving money or changing where it goes.
+
+    Wallets, crypto, payees, beneficiaries, account and routing numbers, cards,
+    gift cards, and invoices that name a new pay-to all match. A product
+    description that only says IBAN or SWIFT does not.
+    """
+    folded = fold(text or "")
+    if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(folded):
+        return True
+    if re.search(r"\binvoices?\b", folded, re.IGNORECASE) and re.search(
+        r"\b(pay(?:able)?\s+to|new\s+(?:account|payee|details)|banking\s+details|account\s+number)\b",
+        folded,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(_payment_change(folded) or _WIRE_REQUEST.search(folded) or _RAIL_CHANGE.search(folded) or _GIFT.search(folded))
+
+
 def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict] | None = None) -> list[str]:
     """Return risk flags. A suppression note is recorded and does not force the category."""
     flags: list[str] = []
     body = raw or email.get("body") or ""
-    hidden = fold(hidden_text(body))
-    combined = fold(f"{text}\n{hidden}")
+    channels = open_channels(body)
+    hidden = channels.concealed
+    combined = fold(f"{email.get('subject') or ''}\n{text}\n{hidden}")
     sender = email.get("from_email") or ""
     raw_hosts = [host.lower().split(":")[0] for host in _URL.findall(body)]
     if lookalike_domain(sender) or any(lookalike_domain(host) for host in raw_hosts):
@@ -379,28 +418,35 @@ def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict
         flags.append("credential_request")
     if _DANGEROUS_FILE.search(combined) or _DANGEROUS_FILE.search(body or ""):
         flags.append("dangerous_attachment")
+    if channels.obfuscated:
+        flags.append("obfuscated_text")
+    if channels.concealed_instruction:
+        flags.append("concealed_instruction")
     if hidden and _HIDDEN_INSTRUCTION.search(hidden):
         flags.append("prompt_injection")
     elif _assistant_instruction(combined):
         flags.append("prompt_injection")
     elif _SUPPRESSION.search(combined):
         flags.append("instruction_suppression")
+    if payment_related(combined):
+        flags.append("payment_related")
     return flags
 
 
 def hard_flags(flags: list[str]) -> list[str]:
-    """Flags that block a normal reply and a CRM write.
+    """Flags that force the suspicious label.
 
     A note that only says "do not alert" is recorded and ignored, so a real
-    outage cannot hide behind it.
+    outage cannot hide behind it. payment_related is a filing block and a
+    banner, not a claim that the message is phishing.
     """
-    return [flag for flag in flags if flag != "instruction_suppression"]
+    soft = {"instruction_suppression", "payment_related"}
+    return [flag for flag in flags if flag not in soft]
 
 
 def money_movement(text: str) -> bool:
-    """A request to wire funds or to change a payment rail. A receipt is not one."""
-    folded = fold(text or "")
-    return bool(_payment_change(folded) or _WIRE_REQUEST.search(folded) or _RAIL_CHANGE.search(folded))
+    """A request to move money or to change where it goes. A receipt is not one."""
+    return payment_related(text)
 
 
 def blocks_autofile(email: dict, text: str, flags: list[str], budget: str | None, category: str) -> bool:
@@ -415,7 +461,7 @@ def blocks_autofile(email: dict, text: str, flags: list[str], budget: str | None
     if hard_flags(flags) or "budget_not_in_body" in flags:
         return True
     folded = fold(text or "")
-    if _payment_change(folded) or _WIRE_REQUEST.search(folded) or _RAIL_CHANGE.search(folded):
+    if payment_related(folded):
         return True
     if free_mail(email.get("from_email") or "") and budget and re.search(
         r"\b(wire|transfer|ach|routing|bank details|account number)\b", folded, re.I

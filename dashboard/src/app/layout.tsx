@@ -13,9 +13,9 @@ const newsreader = Newsreader({
 });
 
 export const metadata: Metadata = {
-  title: "Lane · AI Inbox Triage to CRM",
+  title: "Lane · AI triage with human approval",
   description:
-    "Python and Claude classify inbound mail, draft a reply, and file qualified leads. A demo by Asad Rehman.",
+    "Claude triages inbound mail. A person approves every lead before it reaches the CRM. The no-key mode is a conservative demo.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

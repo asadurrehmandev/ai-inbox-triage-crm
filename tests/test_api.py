@@ -16,26 +16,29 @@ def test_health_reports_demo_mode(client):
     assert body["worker"]["enabled"] is False
 
 
-def test_seed_leaves_a_waiting_queue_and_files_known_leads(client):
+def test_seed_leaves_a_waiting_queue_and_does_not_write_the_crm(client):
     stats = client.get("/api/stats").json()
     assert stats["waiting"] == 8
     assert stats["processed"] >= 30
-    assert stats["leads"] >= 8
+    assert stats["leads"] == 0
     assert stats["hours_saved"] > 0
-    lead_ids = {lead["email_id"] for lead in client.get("/api/crm/leads").json()["leads"]}
-    assert "m01" in lead_ids
-    assert "m32" not in lead_ids
-    assert "m13" not in lead_ids
+    jane = next(item for item in client.get("/api/triage").json()["items"] if item["email_id"] == "m01")
+    assert jane["category"] == "lead"
+    assert client.get("/api/crm/leads").json()["leads"] == []
 
 
 def test_intake_run_qualifies_a_lead_and_drops_spam(client):
     response = client.post("/api/intake/run")
     assert response.status_code == 200
     assert response.json()["processed"] == 8
+    assert client.get("/api/crm/leads").json()["leads"] == []
+    items = client.get("/api/triage").json()["items"]
+    m02 = next(item for item in items if item["email_id"] == "m02")
+    assert m02["category"] == "lead"
+    accepted = client.post(f"/api/triage/{m02['id']}/accept", json={"category": "lead"})
+    assert accepted.status_code == 200
     lead_ids = {lead["email_id"] for lead in client.get("/api/crm/leads").json()["leads"]}
-    assert "m02" in lead_ids
-    assert "m06" in lead_ids
-    assert "m08" in lead_ids
+    assert lead_ids == {"m02"}
     assert "m32" not in lead_ids
     assert "m23" not in lead_ids
     alert_ids = {alert["email_id"] for alert in client.get("/api/alerts").json()["alerts"]}
@@ -46,6 +49,8 @@ def test_intake_run_qualifies_a_lead_and_drops_spam(client):
 
 def test_approve_keeps_edits_and_updates_the_lead(client):
     jane = next(item for item in client.get("/api/triage").json()["items"] if item["email_id"] == "m01")
+    accepted = client.post(f"/api/triage/{jane['id']}/accept", json={"category": "lead"})
+    assert accepted.status_code == 200
     edited = client.post(
         f"/api/triage/{jane['id']}/draft",
         json={"draft_reply": "Hi Jane,\n\nI can start Monday."},
@@ -101,6 +106,16 @@ def test_webhook_is_classified_when_the_worker_runs(client):
     assert run.status_code == 200
     assert run.json()["processed"] == 9
     assert run.json()["source"] == "manual"
+    assert client.get("/api/crm/leads").json()["leads"] == []
+    nina = next(
+        item
+        for item in client.get("/api/triage").json()["items"]
+        if item["from_email"] == "nina.shah@northwindlogistics.com"
+    )
+    assert nina["category"] == "lead"
+    assert nina["budget"] == "$9,000"
+    accepted = client.post(f"/api/triage/{nina['id']}/accept", json={"category": "lead"})
+    assert accepted.status_code == 200
     leads = client.get("/api/crm/leads").json()["leads"]
     match = next(lead for lead in leads if lead["email"] == "nina.shah@northwindlogistics.com")
     assert match["destination"].startswith("mock")

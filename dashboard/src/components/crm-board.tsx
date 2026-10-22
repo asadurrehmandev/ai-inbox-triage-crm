@@ -17,10 +17,11 @@ export function CrmBoard() {
       <section className="px-5 py-6 md:px-8">
         <h1 className="font-serif text-3xl tracking-tight">Qualified leads</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Only a confident lead is written here. Suspicious mail and anything held for review stay out.
-          HubSpot gets lane_budget and lane_intent when those properties exist; otherwise the same
-          text is stored as a note. GoHighLevel gets the same two fields, or a source note if the
-          portal rejects custom fields.
+          A person accepts every lead before it is written here. The no-key demo never files on its
+          own. Mail about moving money or changing a payee stays out: verify it by phone. HubSpot
+          gets lane_budget and lane_intent when those properties exist; otherwise the same text is
+          stored as a note. GoHighLevel gets the same two fields, or a source note if the portal
+          rejects custom fields.
         </p>
         {desk.loading && desk.leads.length === 0 ? (
           <p className="mt-8 text-sm text-muted-foreground">Loading the CRM…</p>
@@ -30,7 +31,7 @@ export function CrmBoard() {
         ) : null}
         {!desk.loading && desk.leads.length === 0 ? (
           <p className="mt-8 border border-dashed border-border px-4 py-8 text-sm text-muted-foreground">
-            No qualified leads yet. Run the worker on the queue. Spam, support, and invoices stay out of this list.
+            No leads yet. Accept one from the queue. Payment-related mail cannot be filed.
           </p>
         ) : null}
         {desk.leads.length > 0 ? (

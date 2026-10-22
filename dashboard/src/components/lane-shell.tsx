@@ -51,7 +51,8 @@ export function LaneShell({
             })}
           </nav>
           <div className="mt-auto hidden text-sm leading-6 text-muted-foreground md:block">
-            <p>Inbox triage for studios that sell automation.</p>
+            <p>AI triage with human approval.</p>
+            <p className="mt-2">The no-key mode is a conservative demo. Claude is the product.</p>
             <p className="mt-4 text-xs tracking-wide uppercase">
               {stats ? modeLabel(stats.mode) : "Connecting"}
             </p>

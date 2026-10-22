@@ -35,6 +35,10 @@ def test_classification_accuracy(capsys):
         # A lookalike labeled spam is filed as suspicious. That is the intended review state.
         hit = result.category == email["label"] or (
             result.category == "suspicious" and email["label"] == "spam"
+        ) or (
+            email["label"] == "urgent"
+            and result.category == "review"
+            and result.suggested_category == "urgent"
         )
         if hit:
             correct += 1
@@ -46,7 +50,10 @@ def test_classification_accuracy(capsys):
     accuracy = correct / len(emails)
     exact = sum(1 for email in emails if classify_rules(email).category == email["label"])
     with capsys.disabled():
-        print(f"\nClassification, suspicious counted for a spam label: {accuracy:.1%} ({correct}/{len(emails)})")
+        print(
+            f"\nClassification, spam-as-suspicious and first-contact urgent-as-review counted: "
+            f"{accuracy:.1%} ({correct}/{len(emails)})"
+        )
         print(f"Exact label match: {exact}/{len(emails)}")
         for label, (hit, total) in sorted(per_label.items()):
             print(f"  {label:8} {hit}/{total}")

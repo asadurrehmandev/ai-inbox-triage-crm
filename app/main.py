@@ -21,7 +21,8 @@ from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email, select_provider
 from app.mailbox import mailbox_mode
-from app.pipeline import accept_suggestion, push_lead, save_classification
+from app.pipeline import accept_suggestion, push_lead, readable_text, save_classification
+from app.risk import payment_related
 from app.db import AlreadyApproved, DraftLocked
 from app.llm import anthropic_model
 from app.seed import reset_demo, seed_if_empty
@@ -429,7 +430,7 @@ def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="no suggested label") from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=409, detail="this message asks for a payment change") from exc
+        raise HTTPException(status_code=409, detail="payment-related: verify by phone") from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Triage record not found") from exc
     return outcome["triage"]
@@ -438,6 +439,8 @@ def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
 @app.post("/api/crm/leads")
 def create_lead(payload: LeadIn) -> dict:
     email = db.get_email(payload.email_id)
+    if email is not None and payment_related(readable_text(email)):
+        raise HTTPException(status_code=409, detail="payment-related: verify by phone")
     result = Classification(
         category=payload.category,
         confidence=1,

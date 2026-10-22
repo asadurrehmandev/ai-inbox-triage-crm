@@ -11,8 +11,8 @@ import re
 from dataclasses import dataclass, field
 
 from app.budget import extract_budget
-from app.prepare import head_and_tail, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
-from app.risk import assess_risk, hard_flags, money_movement
+from app.prepare import head_and_tail, hidden_text, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
+from app.risk import assess_risk, hard_flags, payment_related
 
 CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")
 
@@ -538,6 +538,71 @@ def _suppress_budget(email: dict, text: str) -> bool:
     return False
 
 
+def known_sender(email: dict, known_contacts: list[dict] | None) -> bool:
+    sender = (email.get("from_email") or "").strip().lower()
+    if not sender or not known_contacts:
+        return False
+    for contact in known_contacts:
+        address = (contact.get("email") or "").strip().lower()
+        if address and address == sender:
+            return True
+    return False
+
+
+def existing_thread(email: dict) -> bool:
+    """A reply, not a forward. Forwards are how a stranger arrives with a quote."""
+    subject = email.get("subject") or ""
+    if re.match(r"^\s*((re|aw|sv|antw)\s*:\s*)+", subject, re.IGNORECASE):
+        return True
+    if str(email.get("in_reply_to") or email.get("references") or "").strip():
+        return True
+    body = email.get("body") or ""
+    if re.search(r"(?m)^>", body):
+        return True
+    if re.search(r"\nOn .{0,180} wrote:\s*\n", "\n" + body, re.IGNORECASE):
+        return True
+    return False
+
+
+def has_operational_pressure(text: str) -> bool:
+    """An outage or a deadline. Immediacy alone is not pressure."""
+    lowered = (text or "").lower()
+    if re.search(r"\b(went down|is down|are down|production is down|outage|offline|not responding)\b", lowered):
+        return True
+    if re.search(
+        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|by \d{1,2}\s?(?:am|pm) today|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
+        lowered,
+    ):
+        return True
+    if re.search(r"\b(sev-?1|p0)\b", lowered):
+        return True
+    if re.search(r"\b(losing (?:orders|money|customers|patients)|nothing is shipping)\b", lowered):
+        return True
+    if re.search(r"\b(caída|urgente)\b", lowered) and re.search(r"\b(caída|pedido|pedidos|web|página|pagina)\b", lowered):
+        return True
+    immediacy = re.search(r"\b(right now|asap|immediately|caída|urgente|urgence)\b", lowered)
+    impact = re.search(
+        r"\b(for everyone|everyone|every|nothing is shipping|blank (?:white )?page|errors on every|customers|orders|patients)\b",
+        lowered,
+    )
+    broken = re.search(r"\b(down|broken|stopped|error|errors|failing|switch it off)\b", lowered)
+    if re.search(r"\b5\d\d\b", lowered) and impact and re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered):
+        return True
+    return bool(immediacy and (impact or broken))
+
+
+def urgent_allowed(email: dict, text: str, known_contacts: list[dict] | None) -> bool:
+    """Urgent requires a known sender or a real thread, plus an outage or a deadline.
+
+    Payment mail and anything the caller has already decided is uncertain stay out.
+    """
+    if payment_related(text) or "payment_related" in (email.get("risk_flags") or []):
+        return False
+    if not has_operational_pressure(text):
+        return False
+    return known_sender(email, known_contacts) or existing_thread(email)
+
+
 def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Classification:
     prepared = unwrap_forward(email)
     raw = prepared.get("body") or ""
@@ -575,10 +640,22 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Cla
     if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
         budget = None
     intent = extract_intent(category, text)
-    # Payment-rail changes and wire requests are not auto-filed, and not urgent.
-    if not blocking and category in {"lead", "urgent"} and money_movement(text):
+    concealed = hidden_text(raw)
+    readable = f"{prepared.get('subject') or ''}\n{text}\n{concealed}"
+    # Payment mail is not filed and is not urgent. The person verifies it by phone.
+    if payment_related(readable) and category in {"lead", "urgent"}:
         suggested = suggested or category
-        reasons = [*reasons, "asks to move money or change payment details"]
+        if "payment-related: verify by phone" not in reasons:
+            reasons.append("payment-related: verify by phone")
+        if "payment_related" not in flags:
+            flags = [*flags, "payment_related"]
+        category = "review"
+        confidence = min(confidence, 0.45)
+    # A first contact that only sounds urgent stays in review, including phishing-looking mail.
+    if category == "urgent" and not urgent_allowed(prepared, readable, known_contacts):
+        suggested = suggested or "urgent"
+        if "urgent needs a known sender or an existing thread" not in reasons:
+            reasons.append("urgent needs a known sender or an existing thread")
         category = "review"
         confidence = min(confidence, 0.45)
     return Classification(

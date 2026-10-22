@@ -1,0 +1,14 @@
+{
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "checked": "2026-10-22",
+  "models": {
+    "claude-sonnet-5-5": {
+      "input_per_million": 2.0,
+      "output_per_million": 10.0,
+      "cache_read_per_million": 0.1,
+      "cache_write_per_million": 2.5,
+      "cache_write_1h_per_million": 4.0,
+      "note": "Sonnet 5.5 list price. Cache hits are 0.05x input. The 5-minute cache write is 1.25x input. An estimate, not an invoice."
+    }
+  }
+}

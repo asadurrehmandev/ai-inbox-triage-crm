@@ -8,9 +8,8 @@ subject, body, from_name, and from_email. label, must_flag, name, company, and
 budget are optional and are only used to score the run.
 
 Requires ANTHROPIC_API_KEY. Rate limits (429 and 529) are retried. The cost is
-an estimate from the token usage and the published Sonnet rate of $3 / million
-input tokens and $15 / million output tokens. Cache reads are priced at a tenth
-of the input rate. The figure is an estimate, not an invoice.
+an estimate from token usage and the Sonnet 5.5 rates in config/model_prices.json.
+The figure is an estimate, not an invoice.
 """
 
 from __future__ import annotations
@@ -25,11 +24,25 @@ from pathlib import Path
 
 import httpx
 
-# Published Sonnet list price, used for every claude-sonnet* model id.
-_INPUT_PER_MILLION = 3.0
-_OUTPUT_PER_MILLION = 15.0
-_CACHE_READ_PER_MILLION = 0.30
-_CACHE_WRITE_PER_MILLION = 3.75
+_PRICE_PATH = Path(__file__).resolve().parents[1] / "config" / "model_prices.json"
+
+
+def load_prices(model: str = "claude-sonnet-5-5") -> dict:
+    """Published rates. The eval refuses to guess a price that is not in config."""
+    table = json.loads(_PRICE_PATH.read_text(encoding="utf-8"))
+    models = table.get("models") or {}
+    rates = models.get(model) or models.get("claude-sonnet-5-5")
+    if not rates:
+        raise SystemExit(f"No price for {model} in {_PRICE_PATH}")
+    return {
+        "input": float(rates["input_per_million"]),
+        "output": float(rates["output_per_million"]),
+        "cache_read": float(rates["cache_read_per_million"]),
+        "cache_write": float(rates["cache_write_per_million"]),
+        "source": table.get("source"),
+        "checked": table.get("checked"),
+        "note": rates.get("note") or "Estimate from the published list price. Not an invoice.",
+    }
 
 
 def load_set(path: Path) -> list[dict]:
@@ -51,12 +64,13 @@ def load_set(path: Path) -> list[dict]:
     return payload
 
 
-def estimate_cost(usage: dict) -> float:
+def estimate_cost(usage: dict, prices: dict | None = None) -> float:
+    rates = prices or load_prices()
     return (
-        usage.get("input_tokens", 0) * _INPUT_PER_MILLION
-        + usage.get("output_tokens", 0) * _OUTPUT_PER_MILLION
-        + usage.get("cache_read_input_tokens", 0) * _CACHE_READ_PER_MILLION
-        + usage.get("cache_creation_input_tokens", 0) * _CACHE_WRITE_PER_MILLION
+        usage.get("input_tokens", 0) * rates["input"]
+        + usage.get("output_tokens", 0) * rates["output"]
+        + usage.get("cache_read_input_tokens", 0) * rates["cache_read"]
+        + usage.get("cache_creation_input_tokens", 0) * rates["cache_write"]
     ) / 1_000_000
 
 
@@ -141,6 +155,7 @@ def run(emails: list[dict]) -> dict:
         )
     scored = [row for row in rows if row.get("category_ok") is not None]
     flagged = [row for row in rows if row.get("must_flag")]
+    prices = load_prices(anthropic_model())
     return {
         "model": anthropic_model(),
         "count": len(rows),
@@ -149,14 +164,8 @@ def run(emails: list[dict]) -> dict:
         "non_lead_crm": [row["id"] for row in rows if row.get("must_flag") and row.get("filed_to_crm")],
         "errors": [row["id"] for row in rows if row.get("error")],
         "usage": totals,
-        "estimated_cost_usd": round(estimate_cost(totals), 6),
-        "price_per_million_tokens": {
-            "input": _INPUT_PER_MILLION,
-            "output": _OUTPUT_PER_MILLION,
-            "cache_read": _CACHE_READ_PER_MILLION,
-            "cache_write": _CACHE_WRITE_PER_MILLION,
-            "note": "Estimate from the published Sonnet list price. Not an invoice.",
-        },
+        "estimated_cost_usd": round(estimate_cost(totals, prices), 6),
+        "price_per_million_tokens": prices,
         "rows": rows,
     }
 

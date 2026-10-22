@@ -5,8 +5,9 @@ from __future__ import annotations
 from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email
+from app.normalize import open_channels
 from app.prepare import html_to_text, strip_quotes
-from app.risk import blocks_autofile, hard_flags, money_movement
+from app.risk import blocks_autofile, hard_flags, payment_related
 
 
 def record_from_email(email: dict, result: Classification) -> dict:
@@ -61,21 +62,36 @@ def notify(email: dict, result: Classification) -> dict:
     return alerts.post_alert(result.category, record_from_email(email, result))
 
 
+def readable_text(email: dict) -> str:
+    channels = open_channels(email.get("body") or "")
+    visible = strip_quotes(channels.visible or html_to_text(email.get("body") or ""))
+    return f"{email.get('subject') or ''}\n{visible}\n{channels.concealed}"
+
+
+def _rules_mode(result: Classification) -> bool:
+    return (result.model or "rules").startswith("rules")
+
+
 def apply_policy(email: dict, result: Classification) -> dict:
-    """Confident leads go to the CRM. Risky or uncertain mail is never filed."""
-    visible = strip_quotes(html_to_text(email.get("body") or ""))
-    if result.category == "urgent" and (hard_flags(result.risk_flags) or money_movement(visible)):
-        result.category = "suspicious" if hard_flags(result.risk_flags) else "review"
-    if result.category == "lead" and money_movement(visible):
-        result.suggested_category = result.suggested_category or "lead"
+    """Rules mode never writes the CRM. Claude may file a lead that is not about money."""
+    readable = readable_text(email)
+    if hard_flags(result.risk_flags):
+        result.category = "suspicious"
+    elif payment_related(readable) and result.category in {"lead", "urgent"}:
+        result.suggested_category = result.suggested_category or result.category
         result.category = "review"
+        if "payment_related" not in result.risk_flags:
+            result.risk_flags = [*result.risk_flags, "payment_related"]
     triage = save_classification(email, result)
-    categories = {result.category, *result.secondary_categories}
     lead = None
     alert = None
-    blocked = blocks_autofile(email, visible, result.risk_flags, result.budget, result.category)
-    if "lead" in categories and not blocked:
-        lead = push_lead(email, result)
+    # The no-key engine is a demo. A person accepts every lead. Claude mode
+    # still refuses anything about moving money or changing where it goes.
+    if not _rules_mode(result):
+        categories = {result.category, *result.secondary_categories}
+        blocked = blocks_autofile(email, readable, result.risk_flags, result.budget, result.category)
+        if "lead" in categories and not blocked and not payment_related(readable):
+            lead = push_lead(email, result)
     if result.category != "spam":
         alert = notify(email, result)
     db.set_status(email["id"], "triaged")
@@ -93,7 +109,7 @@ def _email_fields(email: dict) -> dict:
 
 
 def accept_suggestion(row: dict, category: str | None = None) -> dict:
-    """Apply the reviewer's one-click label. A payment request is still not filed."""
+    """Apply the reviewer's label. Mail about moving money is refused."""
     target = category or row.get("suggested_category")
     if target not in {"lead", "support", "invoice", "spam", "urgent", "suspicious"}:
         raise ValueError("no suggested label")
@@ -107,9 +123,11 @@ def accept_suggestion(row: dict, category: str | None = None) -> dict:
         "subject": row.get("subject"),
         "body": row.get("body") or "",
     }
-    visible = strip_quotes(html_to_text(email["body"]))
-    if target == "lead" and blocks_autofile(email, visible, flags, row.get("budget"), "lead"):
-        raise PermissionError("payment change")
+    readable = readable_text(email)
+    if "payment_related" in flags or payment_related(readable):
+        raise PermissionError("payment-related: verify by phone")
+    if target == "lead" and blocks_autofile(email, readable, flags, row.get("budget"), "lead"):
+        raise PermissionError("payment-related: verify by phone")
     confidence = float(row.get("suggestion_confidence") or 0.7)
     updated = db.accept_category(row["id"], target, confidence)
     if updated is None:

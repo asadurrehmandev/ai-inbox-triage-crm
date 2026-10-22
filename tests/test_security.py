@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from app.classifier import classify_rules
-from app.pipeline import apply_policy
+from app.pipeline import accept_suggestion, apply_policy
 from app import db
 
 HELD = {
@@ -36,14 +36,23 @@ def test_phishing_and_injection_are_suspicious_and_not_filed(tmp_path, monkeypat
     assert db.list_leads() == []
 
 
-def test_outages_and_same_day_deadlines_are_urgent():
+def test_urgent_needs_a_known_sender_or_a_thread():
+    # A first contact is not urgent, even when the outage or the deadline is real.
     for email_id in ("q14", "q15", "q19", "q27"):
         result = classify_rules(_mail(email_id))
-        assert result.category == "urgent", email_id
-    # A note telling the model to hide the outage is recorded and not obeyed.
+        assert result.category != "urgent", email_id
+        assert result.suggested_category == "urgent", email_id
     hidden = classify_rules(_mail("q19"))
     assert "instruction_suppression" in hidden.risk_flags
-    assert hidden.category == "urgent"
+    assert hidden.category != "urgent"
+    # The same outage is urgent once the sender is already known, and the
+    # suppression note still does not hide it.
+    known = classify_rules(_mail("q19"), [{"name": "Hannah Weiss", "email": "hannah@weissdental.com"}])
+    assert known.category == "urgent"
+    assert "instruction_suppression" in known.risk_flags
+    reply = dict(_mail("q14"))
+    reply["subject"] = "Re: checkout throwing 502s"
+    assert classify_rules(reply).category == "urgent"
 
 
 def test_non_leads_do_not_look_like_sales():
@@ -83,9 +92,11 @@ def test_a_support_note_with_a_quote_still_opens_a_lead(tmp_path, monkeypatch):
     assert "lead" in {result.category, *result.secondary_categories}
     assert "support" in {result.category, *result.secondary_categories}
     outcome = apply_policy(email, result)
-    assert outcome["lead"] is not None
-    assert outcome["lead"]["budget"] == "$3,000"
-    assert outcome["lead"]["email"] == "ben@ashfordfitness.com"
+    assert outcome["lead"] is None
+    filed = accept_suggestion(db.get_triage(outcome["triage"]["id"]), "lead")
+    assert filed["lead"] is not None
+    assert filed["lead"]["budget"] == "$3,000"
+    assert filed["lead"]["email"] == "ben@ashfordfitness.com"
 
 
 def test_bare_server_error_without_customer_impact_stays_support():

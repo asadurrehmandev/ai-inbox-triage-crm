@@ -26,9 +26,10 @@ from app.classifier import (
     classification_from_payload,
     classify_rules,
     draft_reply,
+    urgent_allowed,
 )
 from app.prepare import head_and_tail, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
-from app.risk import assess_risk, hard_flags, money_movement
+from app.risk import assess_risk, hard_flags, payment_related
 
 logger = logging.getLogger("lane.llm")
 
@@ -256,7 +257,12 @@ def _visible_text(email: dict) -> str:
     return f"{email.get('subject', '')}\n{body}"
 
 
-def apply_model_guard(result: Classification, email: dict, ruled: Classification) -> Classification:
+def apply_model_guard(
+    result: Classification,
+    email: dict,
+    ruled: Classification,
+    known_contacts: list[dict] | None = None,
+) -> Classification:
     """Risk and invented amounts override the model. The model's draft stays visible."""
     visible = _visible_text(email)
     flags = assess_risk(email, visible, email.get("body") or "", None)
@@ -317,12 +323,16 @@ def apply_model_guard(result: Classification, email: dict, ruled: Classification
     if re.search(r"\b(i will pay|payment has been sent|i have paid|wire the funds)\b", result.draft_reply, re.I):
         result.category = "review"
         result.draft_reply = "Needs review. The draft was discarded because it promised a payment."
-    if result.category == "urgent" and (blocking or money_movement(visible)):
+    if result.category == "urgent" and (
+        blocking or payment_related(visible) or not urgent_allowed(email, visible, known_contacts)
+    ):
         result.category = "suspicious" if blocking else "review"
-    if result.category == "lead" and money_movement(visible):
+    if result.category == "lead" and payment_related(visible):
         result.suggested_category = result.suggested_category or "lead"
         result.model_suggestion = result.model_suggestion or "lead"
         result.category = "review"
+        if "payment_related" not in result.risk_flags:
+            result.risk_flags = [*result.risk_flags, "payment_related"]
     if not result.suggested_category:
         result.suggested_category = ruled.suggested_category
         result.suggestion_confidence = ruled.suggestion_confidence
@@ -357,7 +367,7 @@ def classify_live(email: dict, known_contacts: list[dict] | None = None) -> tupl
     )
     body = response.json()
     result = _validate(_tool_payload(body), model="anthropic")
-    return apply_model_guard(result, bounded, ruled), _usage(body)
+    return apply_model_guard(result, bounded, ruled, known_contacts), _usage(body)
 
 
 def classify_email(email: dict, known_contacts: list[dict] | None = None) -> Classification:
@@ -375,4 +385,4 @@ def classify_email(email: dict, known_contacts: list[dict] | None = None) -> Cla
         ruled.model = "rules-fallback"
         ruled.llm_error = _error_label(exc)
         return ruled
-    return apply_model_guard(result, bounded, ruled)
+    return apply_model_guard(result, bounded, ruled, known_contacts)

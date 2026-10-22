@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "02",
     title: "Classify",
-    copy: "Claude decides lead, support, invoice, spam, or urgent. Rules cover the demo.",
+    copy: "Claude classifies the message. With no API key, a conservative rules demo fills in.",
   },
   {
     n: "03",
@@ -31,7 +31,7 @@ const STEPS = [
   {
     n: "05",
     title: "CRM",
-    copy: "Leads go through the mock adapter, then HubSpot or GoHighLevel when a token is set.",
+    copy: "Rules mode never writes the CRM. A person accepts the lead. Claude files one only when the mail is not about moving money.",
   },
   {
     n: "06",

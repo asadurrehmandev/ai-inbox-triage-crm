@@ -30,6 +30,9 @@ export function Metrics({ stats }: { stats: Stats }) {
           <Stat label="Leads in CRM" value={stats.leads} />
         </dl>
       </div>
+      <p className="mt-4 max-w-3xl text-sm text-muted-foreground">
+        Leads reach the CRM only after a person accepts them. The no-key mode does not file on its own.
+      </p>
       <div className="mt-5 flex h-1.5 overflow-hidden rounded-full bg-secondary">
         {CATEGORIES.map((category) => {
           const count = stats.by_category[category] ?? 0;

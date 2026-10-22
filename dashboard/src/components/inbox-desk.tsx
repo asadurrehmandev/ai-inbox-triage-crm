@@ -82,7 +82,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
               <div>
                 <h2 className="font-serif text-2xl tracking-tight">The morning queue</h2>
                 <p className="text-sm text-muted-foreground">
-                  {desk.pending.length} waiting for the worker
+                  AI triage with human approval. {desk.pending.length} waiting for the worker
                   {desk.worker?.enabled ? ` · ${cadence(desk.worker.interval_seconds)}` : ""}
                 </p>
               </div>
@@ -163,6 +163,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
               onSave={(draft) => desk.saveDraft(selected.id, draft)}
               onApprove={() => desk.approve(selected.id)}
               onAccept={(category) => desk.acceptLabel(selected.id, category)}
+              inCrm={desk.leads.some((lead) => lead.email_id === selected.email_id)}
             />
           ) : (
             <p className="px-8 py-16 text-sm text-muted-foreground">
@@ -194,6 +195,9 @@ function QueueRow({ item }: { item: Triage }) {
       <span className="mt-1 flex gap-3 text-xs text-muted-foreground">
         <span>{item.company || "No company"}</span>
         <span>{item.budget || "No amount"}</span>
+        {item.risk_flags?.includes("payment_related") ? (
+          <span>payment-related: verify by phone</span>
+        ) : null}
         <span>
           {item.category === "review" && item.suggested_category
             ? `Suggest ${item.suggested_category} ${Math.round((item.suggestion_confidence ?? item.confidence) * 100)}%`

@@ -1,10 +1,10 @@
 # AI Inbox Triage to CRM (Python + Claude)
 
-A client-facing case study by **Asad Rehman**. Lane reads a busy inbox, decides what each message is, pulls out the fields a CRM actually needs, and holds a reply until a person approves it. Qualified leads land in the CRM. Everyone else gets a Slack-style alert. Spam stays quiet.
+A client-facing case study by **Asad Rehman**. Lane is **AI triage with human approval**. It reads a busy inbox, suggests what each message is, pulls out the fields a CRM actually needs, and holds the reply until a person approves it. A lead is written to the CRM only after that person accepts it.
 
-The whole path is Python. A FastAPI service accepts mail from a webhook or from IMAP. An APScheduler worker classifies each message with **Claude** when an API key is present, and with a built-in rule engine when it is not. A CRM adapter writes a mock record for the desk and, when tokens exist, the same contact to HubSpot or GoHighLevel.
+The whole path is Python. A FastAPI service accepts mail from a webhook or from IMAP. An APScheduler worker classifies each message with **Claude** when an API key is present. That is the product. With no key, a conservative rules demo fills in so the desk can be clicked through. The demo is not a phishing filter. A CRM adapter writes a mock record for the desk and, when tokens exist, the same contact to HubSpot or GoHighLevel.
 
-No paid key is required to click through the demo.
+No paid key is required to click through the demo. The demo never files a lead on its own.
 
 ## The problem
 
@@ -17,11 +17,11 @@ The expensive failure is not the reading. It is the lead that sits until Thursda
 Lane is a human-in-the-loop desk with a small Python worker behind it.
 
 1. Mail arrives on `POST /api/webhooks/email`, or the worker polls IMAP for anything unseen. The demo uses a labeled sample feed instead of a live mailbox.
-2. A security check runs first. Phishing, a bank-change request, or a prompt injection is marked **suspicious**, skipped by the model, and not written to the CRM.
-3. The worker asks Claude (or the rule engine) to classify the message as **lead, support, invoice, spam, urgent, or suspicious**, and to extract **name, company, budget, and intent**.
-4. It writes a draft in Asad's voice. It does not send it. A suspicious message gets a "do not reply" note instead.
-5. If the message is a lead, the CRM adapter upserts the contact and the worker posts a Slack-style alert. Support, invoices, urgent, and suspicious mail are alerted and queued. Spam is stored and not announced.
-6. A person opens the dashboard, edits the draft if they want, and approves it.
+2. The message is normalized before any rule runs: zero-width and bidi characters are stripped, off-screen and hidden HTML is dropped, and base64, quoted-printable, and HTML-entity runs are decoded. Concealed prose is flagged. This is not a list of attack phrases.
+3. Claude (or, with no key, the rules demo) suggests **lead, support, invoice, spam, urgent, suspicious, or needs review**, and extracts **name, company, budget, and intent**. Urgent requires a known sender or an existing reply thread, plus an outage or a deadline. A first contact does not jump the queue.
+4. It writes a draft in Asad's voice. It does not send it.
+5. In the rules demo, nothing is written to the CRM. A person presses **Accept and file in CRM**. Claude mode may file a lead on its own, and it refuses the same mail the Accept button refuses: anything about moving money or changing where money goes (wallets, crypto, payees, beneficiaries, account or routing numbers, cards, gift cards, an invoice with new pay-to details, "update our details"). That mail shows **payment-related: verify by phone** and is not filed.
+6. A person opens the dashboard, edits the draft if they want, and approves it. Spam is stored and not announced. Other mail gets a Slack-style alert.
 
 Hours returned are counted at six minutes a message: read, label, CRM entry, first reply. Spam and suspicious mail are left out of that count. The dashboard shows the total for the mailbox in front of you. The "8.0 hours" figure is the same rate on an assumed 80-message day. It is an assumption, not a measurement.
 
@@ -55,6 +55,7 @@ flowchart LR
   Worker --> Claude
   Worker --> Rules
   Worker --> Draft --> Desk
+  Desk --> Adapter
   Worker --> Adapter
   Adapter --> MockCrm
   Adapter --> Hub
@@ -71,28 +72,30 @@ flowchart LR
 
 ![Leads written through the CRM adapter](artifacts/crm_leads.png)
 
+![A payment note held for a phone check. The rules demo has not written the CRM.](artifacts/payment_banner.png)
+
 ![Slack-style alert feed](artifacts/alert_feed.png)
 
 ![Run the worker, then approve the reply](artifacts/worker_approval.gif)
 
-- **No paid keys required.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. Classification, extraction, and drafts use the rule engine, and the sidebar says so. Add an Anthropic key and the next pass calls Claude (`claude-sonnet-5-5`, the active Sonnet as of 2026-10-22). An OpenAI key is the second provider. If a live call fails, the rules still return a decision, the row is stored as `rules-fallback` with the error type, and `/api/health` counts those fallbacks. Retries cover 429, 5xx, and Anthropic's 529 overload status. A budget the model names has to be written in the message; otherwise the row is held for review and the model's draft is kept on the card.
+- **No paid keys required for the demo.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. The sidebar says "Rules demo · no API key". That mode is a conservative stand-in, not the product. Add an Anthropic key and the next pass calls Claude (`claude-sonnet-5-5`, the active Sonnet as of 2026-10-22). An OpenAI key is the second provider. If a live call fails, the rules still return a decision, the row is stored as `rules-fallback` with the error type, and `/api/health` counts those fallbacks. Retries cover 429, 5xx, and Anthropic's 529 overload status. A budget the model names has to be written in the message; otherwise the row is held for review and the model's draft is kept on the card.
 - **Webhook ingest.** `POST /api/webhooks/email` queues one message. The body must carry `X-Lane-Signature: sha256=<hmac of the raw body>` using `WEBHOOK_SECRET`. The same `message_id` (or the same sender, subject, time, and body) returns `duplicate` instead of queueing a second copy. The worker picks it up on the next pass, or immediately if you call `POST /api/worker/run`.
 - **Scheduler.** APScheduler polls on `WORKER_INTERVAL_SECONDS` (60 by default). The Worker page shows the next run and the log of passes.
 - **Mock mailbox.** Forty-four labeled messages stand in for IMAP. Eight stay unseen so Run worker has something to do.
-- **CRM adapter.** A confident lead is written to the mock CRM the dashboard reads. Suspicious mail, anything held for review, and any request to wire money or change an ACH, routing number, or bank detail are not. A free-mail sender with a price and a payment ask is not filed either. Set `HUBSPOT_TOKEN` and the same contact is upserted by email. Lane creates the contact properties `lane_budget` and `lane_intent` (string fields on the contact object). If the portal rejects them, the budget and intent go into a note associated with that contact. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact with those two custom fields, or puts the same text on `source` if the location rejects custom fields. A remote failure is stored on the lead and shown in the CRM table.
+- **CRM adapter.** The rules demo does not write the CRM. A person accepts the lead first. Claude mode can file a lead, and both paths refuse mail about moving money or changing a payee. The card says "payment-related: verify by phone". Set `HUBSPOT_TOKEN` and an accepted contact is upserted by email. Lane creates the contact properties `lane_budget` and `lane_intent` (string fields on the contact object). If the portal rejects them, the budget and intent go into a note associated with that contact. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact with those two custom fields, or puts the same text on `source` if the location rejects custom fields. A remote failure is stored on the lead and shown in the CRM table.
 - **Mock Slack.** Alerts render in the dashboard. `SLACK_WEBHOOK_URL` also posts them.
 - **Approve or edit.** The draft is a real textarea. Approve marks the lead "Reply approved" and posts a second alert. Nothing is emailed until you connect a sender.
-- **Measured accuracy.** The rule engine is a conservative fallback, not a claim about Claude. Low-confidence mail goes to **needs review** instead of being guessed as a lead, an invoice, or urgent. `pytest` prints the rates.
+- **Measured accuracy.** The rule engine is a conservative demo, not a claim about Claude, and not a phishing detector. Low-confidence mail goes to **needs review**. A first-contact outage or deadline goes to review as well: urgent now requires a known sender or a reply thread. `pytest` prints the rates. None of these files is a sealed holdout.
 
-  Dev mailbox (`data/sample_emails.json`, 44 messages, used while writing the rules): exact category **43/44**. The miss is `m35`, a McAfee lookalike labeled spam and filed as **suspicious**. Counting that as the right spam decision is **44/44**. Name, company, and budget **44/44**. Intent **43/44** (`m35` is "review a suspicious message").
+  Dev mailbox (`data/sample_emails.json`, 44 messages, used while writing the rules): exact category **37/44**. Six of the misses are first-contact messages labeled urgent and now held for review, which is the new rule. The seventh is `m35`, a McAfee lookalike labeled spam and filed as **suspicious**. Counting suspicious-as-spam and first-contact urgent-as-review is **44/44**. Name, company, and budget **44/44**. Intent **43/44** (`m35`).
 
-  `data/eval_unseen.json` (68 messages) was written in the same pass as an earlier ruleset and **was** used as a word list. It is not a held-out set. On the current rules it scores **53/68 (77.9%)**. Do not cite the old 68/68 figure.
+  `data/eval_unseen.json` (68 messages) was written in the same pass as an earlier ruleset and **was** used as a word list. It is not a held-out set. On the current rules it scores **46/68 (67.6%)**. The drop from the previous 53/68 is mostly first-contact "urgent" mail now held for review. Do not cite the old 68/68 figure.
 
-  `data/eval_fresh.json` (36 messages, SHA-256 `6598554eb9358b571f08d994bd50a7e4be414182d697170927063f35ce6cf857`) was added in the same commit as an earlier risk rewrite. The hash stops later edits. It does not make the file unseen. Treat **34/36** as a regression floor. The two misses are a how-to with no defect word (`f02` → review) and an unsubscribe-only note (`f13` → review). All **7/7** structural phishing messages in that file are suspicious.
+  `data/eval_fresh.json` (36 messages, SHA-256 `6598554eb9358b571f08d994bd50a7e4be414182d697170927063f35ce6cf857`) was added in the same commit as an earlier risk rewrite. The hash stops later edits. It does not make the file unseen. Current score **30/36**. Four misses are first-contact urgent labels now held for review (`f04`, `f10`, `f18`, `f28`). The other two are older: a how-to with no defect word (`f02` → review) and an unsubscribe-only note (`f13` → review). All **7/7** structural phishing messages in that file are suspicious.
 
-  Outside set `tests/new_emails_v2.py` (53 messages). Rules mode: classification **26/53**. Phishing, fraud, and injection **9/9** suspicious. Legitimate mail flagged suspicious: **0/39**. Urgent **6/6**. Budget, where a value exists, **24/24**. Name + company + budget on filled slots **93/95**. Non-leads written to the CRM: **0**. Weak spots: plain support questions go to review (**0/7** called support), and real leads without a clear buying signal stay in review.
+  Outside set `tests/new_emails_v2.py` (53 messages). Rules mode: classification **20/53**. Phishing, fraud, and injection **9/9** suspicious. Legitimate mail flagged suspicious: **0/39**. Urgent **0/6**, because those six are first contacts and now sit in review with urgent suggested. Budget, where a value exists, **24/24**. Name + company + budget on filled slots **93/95**. Non-leads written to the CRM: **0**. The rules demo writes no leads at all until Accept. Weak spots: plain support questions go to review (**0/7** called support), and real leads without a clear buying signal stay in review.
 
-  Outside set `tests/new_emails_v3.py` (45 messages, written after the previous risk layer). Rules mode: classification **42/45** where `review` is an accepted label for a low-confidence legitimate message. Phishing, fraud, and injection **16/16** suspicious, none marked urgent, none written to the CRM. Legitimate mail flagged suspicious: **0/27**. Budget, where a value exists, **18/19** after this pass (the miss is a Spanish amount, `v07`). Name + company + budget on filled slots **64/67**. Weak spots: a German outage with no English outage word stays in review (`v12`), and a remittance-product lead is read as an invoice (`v36`) because the work is about invoices. Eleven real leads are held for a person instead of being filed. The review queue is ranked by confidence and shows the suggested label and the reasons, with one click to accept the label.
+  Outside set `tests/new_emails_v3.py` (45 messages, written after an earlier risk layer). Rules mode: classification **40/45** where `review` is an accepted label for a low-confidence legitimate message. The three urgent labels are first contacts, so they are review, not urgent. Phishing, fraud, and injection **16/16** suspicious, none marked urgent, none written to the CRM. Legitimate mail flagged suspicious: **0/27**. Budget, where a value exists, **18/19** (the miss is a Spanish amount, `v07`). Name + company + budget on filled slots **64/67**. A remittance-product lead is read as an invoice (`v36`) because the work is about invoices. Real leads are held for a person instead of being filed.
 
   A live Claude score is not included here. Run it on a set this repo was not tuned on:
 
@@ -100,7 +103,22 @@ flowchart LR
   python -m evals.live_claude --set path/to/messages.json
   ```
 
-  The command retries 429 and 529, and the JSON includes token usage and an estimated cost from the published Sonnet list price ($3 / million input tokens, $15 / million output tokens). It refuses to run without `ANTHROPIC_API_KEY`.
+  The command retries 429 and 529. The JSON includes token usage and an estimated cost read from `config/model_prices.json`. Checked against Anthropic's pricing page on 2026-10-22, Claude Sonnet 5.5 is **$2 / million input tokens** and **$10 / million output tokens**. Cache hits are **$0.10** and the 5-minute cache write is **$2.50**. The figure is an estimate, not an invoice. The command refuses to run without `ANTHROPIC_API_KEY`.
+
+## Limitations
+
+The rules demo does not catch phishing. It refuses to file mail, and it refuses to call a stranger urgent. These families still get through as ordinary mail unless they also trip the payment rule or a concealed-text flag:
+
+- QR codes and image-only messages. There is no image reader.
+- Cousin domains that are not a known brand with a swapped character (`northwind-logistics.co` next to a real `northwindlogistics.com`).
+- A reply-chain hijack that quotes a real thread and then asks for ordinary-looking work.
+- Calendar invites and meeting requests.
+- Polite payee changes are blocked from the CRM and show the phone banner. They are not reliably marked suspicious.
+- Crypto and wallet notes are blocked from the CRM the same way. A message that never uses those words is not.
+- Non-English outages that do not use an English outage or deadline word (the German sample stays in review).
+- Instructions a person can read in the normal text. Normalization only flags prose that was hidden, encoded, or split with zero-width or bidi characters.
+
+Chasing each of those with another phrase list is the arms race this desk stops playing. Claude is the classifier. A person accepts the lead. Payment mail is verified by phone.
 
 ## Run it
 
@@ -199,6 +217,6 @@ Webhook body:
 
 **Title:** AI Inbox Triage to CRM (Python + Claude)
 
-**Description:** I build a Python service that reads a client's inbox, classifies each message with Claude, and pulls out the name, company, budget, and intent. A worker files qualified leads in HubSpot or GoHighLevel and drafts a reply for a person to approve. It runs with no API key in the demo, so the desk can be reviewed before Claude is turned on.
+**Description:** I build a Python service that reads a client's inbox and classifies each message with Claude, pulling out the name, company, budget, and intent. A person approves the draft and accepts the lead before it is written to HubSpot or GoHighLevel. The no-key mode is a conservative demo, not a phishing filter. Claude is the product.
 
 **Tags:** Python, Claude, AI Automation, HubSpot, FastAPI
