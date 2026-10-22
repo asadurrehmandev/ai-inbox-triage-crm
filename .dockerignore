@@ -5,4 +5,3 @@ dashboard/node_modules
 dashboard/.next
 .git
 data/*.db
-n8n_data

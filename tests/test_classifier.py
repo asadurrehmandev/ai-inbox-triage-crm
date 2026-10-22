@@ -153,12 +153,26 @@ def test_llm_payload_rejects_an_unknown_category():
         classification_from_payload({"category": "newsletter", "confidence": 0.2}, model="openai")
 
 
-def test_labeled_mail_and_case_study_do_not_mention_n8n():
+def test_repository_does_not_name_the_retired_orchestrator():
+    banned = "n" + "8n"
     root = Path(__file__).resolve().parents[1]
-    for relative in ("README.md", "data/sample_emails.json", "docker-compose.yml"):
-        text = (root / relative).read_text(encoding="utf-8").lower()
-        assert "n8n" not in text, relative
-    assert not (root / "n8n").exists()
+    skip = {".git", "node_modules", ".next", ".venv", ".pytest_cache", "__pycache__"}
+    offenders = []
+    for path in root.rglob("*"):
+        if any(part in skip for part in path.parts):
+            continue
+        if banned in path.name.lower():
+            offenders.append(str(path.relative_to(root)))
+            continue
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if banned in text.lower():
+            offenders.append(str(path.relative_to(root)))
+    assert offenders == []
 
 
 def _by_id(email_id: str) -> dict:
