@@ -1,44 +1,18 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
+import { ListChecks } from "lucide-react";
+import { DeskError } from "@/components/desk-error";
 import { DeskLogin } from "@/components/desk-login";
+import { EmptyState } from "@/components/empty-state";
 import { LaneShell } from "@/components/lane-shell";
-import { Metrics } from "@/components/metrics";
+import { TimeSavedEstimate } from "@/components/metrics";
+import { StatusBadge } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useDelayed } from "@/components/use-delayed";
 import { useDesk } from "@/components/use-desk";
-import { cadence, formatWhen, modeLabel, type Run } from "@/lib/types";
-
-const STEPS = [
-  {
-    n: "01",
-    title: "Ingest",
-    copy: "A webhook or an IMAP poll drops the message on the unseen queue.",
-  },
-  {
-    n: "02",
-    title: "Classify",
-    copy: "Demo mode drafts from the sample pipeline. Paste a key and Claude or OpenAI classifies the message.",
-  },
-  {
-    n: "03",
-    title: "Extract",
-    copy: "Name, company, budget, and intent come off the message as fields.",
-  },
-  {
-    n: "04",
-    title: "Draft",
-    copy: "A reply is written and held. Nothing is sent until a person approves it.",
-  },
-  {
-    n: "05",
-    title: "CRM",
-    copy: "Demo mode never writes the CRM. A person accepts the lead. Live AI files one only when the mail is not about moving money.",
-  },
-  {
-    n: "06",
-    title: "Alert",
-    copy: "Slack hears about leads, urgent mail, support, and invoices. Spam stays quiet.",
-  },
-];
+import { cadence, formatWhen, runDuration, type Run } from "@/lib/types";
 
 const SOURCE: Record<string, string> = {
   startup: "Sample mailbox",
@@ -50,84 +24,120 @@ const SOURCE: Record<string, string> = {
 export function WorkerBoard() {
   const desk = useDesk();
   const worker = desk.worker;
+  const showSkeleton = useDelayed(desk.loading && desk.runs.length === 0);
+
   if (desk.error === "unauthorized" && !desk.stats) {
     return <DeskLogin onDone={() => void desk.refresh()} />;
   }
+
   return (
-    <LaneShell stats={desk.stats}>
-      {desk.stats ? <Metrics stats={desk.stats} /> : null}
-      <section className="px-5 py-6 md:px-8">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="text-[11px] tracking-[0.16em] text-muted-foreground uppercase">
-              APScheduler
-            </p>
-            <h1 className="mt-1 font-serif text-3xl tracking-tight">Python worker</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              {worker
-                ? worker.enabled
-                  ? `Checks the mailbox ${cadence(worker.interval_seconds)}. Next pass ${formatWhen(worker.next_run_at) || "is scheduled"}. Classifier: ${desk.stats ? modeLabel(desk.stats.mode) : "rules"}.`
-                  : "The scheduler is paused in this process. Run worker still drains the queue."
-                : "Connecting to the worker."}
-            </p>
-          </div>
-          <Button
-            type="button"
-            onClick={() => void desk.runIntake()}
-            disabled={desk.busy || desk.pending.length === 0}
-          >
-            {desk.busy ? "Working" : "Run worker"}
-          </Button>
-        </div>
-
-        <ol className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {STEPS.map((step) => (
-            <li key={step.n} className="border border-border bg-card px-4 py-4">
-              <p className="font-serif text-2xl leading-none text-muted-foreground">{step.n}</p>
-              <h2 className="mt-3 text-sm tracking-[0.14em] uppercase">{step.title}</h2>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">{step.copy}</p>
-            </li>
-          ))}
-        </ol>
-
-        <h2 className="mt-10 font-serif text-2xl tracking-tight">Recent passes</h2>
-        {desk.runs.length === 0 ? (
-          <p className="mt-4 border border-dashed border-border px-4 py-8 text-sm text-muted-foreground">
-            No passes yet. The scheduler will take one, or you can run the worker now.
+    <LaneShell>
+      <div className="flex h-full flex-col overflow-auto">
+        {desk.error ? <DeskError message={desk.error} onRetry={() => void desk.refresh()} /> : null}
+        <div className="px-4 py-3">
+          <p className="text-sm text-muted-foreground">
+            {worker
+              ? worker.enabled
+                ? `APScheduler checks the mailbox ${cadence(worker.interval_seconds)}. Next pass ${formatWhen(worker.next_run_at) || "is scheduled"}.`
+                : "APScheduler is paused in this process. Run worker still drains the queue."
+              : "Connecting to the worker."}
           </p>
-        ) : (
-          <div className="mt-4 overflow-auto border border-border">
-            <table className="w-full min-w-[640px] text-left text-sm">
-              <thead className="bg-card text-[11px] tracking-[0.14em] text-muted-foreground uppercase">
-                <tr>
-                  <th className="px-4 py-3 font-medium">When</th>
-                  <th className="px-4 py-3 font-medium">Source</th>
-                  <th className="px-4 py-3 font-medium">Processed</th>
-                  <th className="px-4 py-3 font-medium">Leads</th>
-                  <th className="px-4 py-3 font-medium">Alerts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {desk.runs.map((run) => (
-                  <tr key={run.id} className="border-t border-border">
-                    <td className="px-4 py-3">{formatWhen(run.finished_at)}</td>
-                    <td className="px-4 py-3">{sourceLabel(run)}</td>
-                    <td className="px-4 py-3">{run.processed}</td>
-                    <td className="px-4 py-3">{run.leads}</td>
-                    <td className="px-4 py-3">{run.alerts}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <p className="mt-1 text-xs text-subtle-foreground">
+            Point a forwarder at <span className="font-mono">POST /api/webhooks/email</span>.
+          </p>
+        </div>
+        {showSkeleton && desk.runs.length === 0 ? (
+          <div className="space-y-2 px-4">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Skeleton key={index} className="h-10 w-full" />
+            ))}
           </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Started</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead className="text-right">Processed</TableHead>
+                <TableHead className="text-right">Labelled</TableHead>
+                <TableHead className="text-right">Errors</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow>
+                <TableCell>
+                  <div className="font-medium">Recorded Claude pass</div>
+                  <div className="mt-1">
+                    <StatusBadge tone={desk.recording?.present ? "success" : "neutral"}>
+                      {desk.recording?.present ? "Recorded" : "No recording yet"}
+                    </StatusBadge>
+                  </div>
+                  {desk.recording && !desk.recording.present ? (
+                    <p className="mt-1 text-xs text-muted-foreground">{desk.recording.label}</p>
+                  ) : null}
+                </TableCell>
+                <TableCell className="text-subtle-foreground">–</TableCell>
+                <TableCell className="text-right tabular-nums">{desk.recording?.count ?? "–"}</TableCell>
+                <TableCell className="text-right text-subtle-foreground">–</TableCell>
+                <TableCell className="text-right text-subtle-foreground">–</TableCell>
+              </TableRow>
+              {desk.runs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5}>
+                    <EmptyState
+                      icon={ListChecks}
+                      title="No passes yet"
+                      body="The scheduler will take one, or you can run the worker now."
+                    />
+                  </TableCell>
+                </TableRow>
+              ) : (
+                desk.runs.map((run) => (
+                  <TableRow key={run.id}>
+                    <TableCell>
+                      <div className="tabular-nums">{formatWhen(run.started_at)}</div>
+                      <div className="text-xs text-muted-foreground">{sourceLabel(run)}</div>
+                    </TableCell>
+                    <TableCell className="tabular-nums">{runDuration(run.started_at, run.finished_at)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{run.processed}</TableCell>
+                    <TableCell className="text-right tabular-nums" title="Messages given a category in this pass">
+                      {run.processed}
+                    </TableCell>
+                    <TableCell className="text-right text-subtle-foreground" title="This pass does not record a separate error count">
+                      –
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
         )}
-
-        <p className="mt-6 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Point Gmail, Outlook, or a forwarder at{" "}
-          <code className="font-mono text-xs">POST /api/webhooks/email</code>. The message waits
-          on the unseen queue until this worker classifies it.
-        </p>
-      </section>
+        {desk.recording?.present ? (
+          <div className="px-4 py-3">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={desk.busy}
+              onClick={() => void desk.replayRecording()}
+            >
+              Replay recorded pass
+            </Button>
+          </div>
+        ) : null}
+        <div className="mt-auto">
+          {desk.stats ? <TimeSavedEstimate stats={desk.stats} /> : null}
+          <div className="px-4 py-3">
+            <button
+              type="button"
+              className="text-sm text-muted-foreground underline-offset-2 hover:underline"
+              onClick={() => void desk.resetDemo()}
+              disabled={desk.busy}
+            >
+              Reset sample mailbox
+            </button>
+          </div>
+        </div>
+      </div>
     </LaneShell>
   );
 }

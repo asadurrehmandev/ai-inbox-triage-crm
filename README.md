@@ -44,11 +44,17 @@ In another terminal: `cd dashboard && npm install && npm run dev`, then open htt
 
 ## The desk
 
-![The morning queue, with a retainer lead and its draft waiting for approval](artifacts/desk_queue.png)
+The inbox is a list and a reading pane. J and K move the selection. E or ⌘↵ approves the open message. ⌘K opens the command menu. Hours saved sit on the worker page as **Time saved (estimate)**.
 
-![A payment note held for a phone check. Accept does not file it.](artifacts/desk_phone.png)
+![Inbox in the light theme, with a retainer lead and its draft waiting for approval](docs/screenshots/inbox-1440-light.png)
 
-![Leads that a person accepted. The rules demo does not write this table on its own.](artifacts/desk_crm.png)
+![The same inbox in the dark theme](docs/screenshots/inbox-1440-dark.png)
+
+![The inbox on a phone-width screen](docs/screenshots/inbox-390-light.png)
+
+![The worker page. The hours figure is labelled as an estimate. Recorded Claude pass: no recording yet.](docs/screenshots/worker-1440-light.png)
+
+![The CRM before anyone has accepted a lead. Demo mode does not write this table on its own.](docs/screenshots/crm-1440-light.png)
 
 ## Scores
 

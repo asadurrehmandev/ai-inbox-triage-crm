@@ -116,16 +116,6 @@ export type Alert = {
 
 export const CATEGORIES = ["lead", "support", "invoice", "spam", "urgent", "suspicious", "review"] as const;
 
-export const CATEGORY_COLOR: Record<string, string> = {
-  lead: "#1f6b45",
-  support: "#1e4f78",
-  invoice: "#8a5a12",
-  spam: "#7a403c",
-  urgent: "#9c3d22",
-  suspicious: "#6b3fa0",
-  review: "#3d4a66",
-};
-
 export function categoryLabel(category: string) {
   if (category === "review") return "Needs review";
   return category.slice(0, 1).toUpperCase() + category.slice(1);
@@ -155,4 +145,27 @@ export function formatWhen(iso: string | null | undefined) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+export function formatListTime(iso: string | null | undefined) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  if (sameDay) {
+    return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+export function runDuration(started: string, finished: string) {
+  const a = new Date(started).getTime();
+  const b = new Date(finished).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return "–";
+  const seconds = Math.round((b - a) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 }

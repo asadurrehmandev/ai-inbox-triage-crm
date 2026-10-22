@@ -1,20 +1,20 @@
 import type { Metadata } from "next";
-import { Figtree, Newsreader } from "next/font/google";
-import { SessionKeyProvider } from "@/components/session-key";
+import { Geist, Geist_Mono } from "next/font/google";
+import { Providers } from "@/components/providers";
 import "./globals.css";
 
-const figtree = Figtree({
-  variable: "--font-figtree",
+const geist = Geist({
+  variable: "--font-geist",
   subsets: ["latin"],
 });
 
-const newsreader = Newsreader({
-  variable: "--font-newsreader",
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Lane · AI triage with human approval",
+  title: "Lane",
   description:
     "Runs out of the box in Demo mode with sample responses. Paste your own Anthropic or OpenAI key, never stored, to test the live AI. A person approves every lead before it reaches the CRM.",
 };
@@ -23,10 +23,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${figtree.variable} ${newsreader.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`${geist.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-background text-foreground">
-        <SessionKeyProvider>{children}</SessionKeyProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

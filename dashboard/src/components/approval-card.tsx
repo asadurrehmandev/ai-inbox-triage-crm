@@ -1,15 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type RefObject } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
-  CATEGORY_COLOR,
+  StatusBadge,
+  categoryTone,
+  confidencePresentation,
+  scoreSource,
+} from "@/components/status-badge";
+import {
   categoryLabel,
   formatWhen,
   type AcceptResult,
   type Triage,
 } from "@/lib/types";
+import { toast } from "sonner";
+
+export type ReaderActions = {
+  primary: () => void;
+  edit: () => void;
+  notLead: () => void;
+  canNotLead: boolean;
+  canPrimary: boolean;
+  primaryLabel: string;
+};
+
+const ARCHIVE = new Set(["spam", "suspicious", "review"]);
 
 export function ApprovalCard({
   item,
@@ -18,19 +36,26 @@ export function ApprovalCard({
   onApprove,
   onAccept,
   onLive,
+  onSnooze,
+  onDone,
   inCrm = false,
+  actionRef,
 }: {
   item: Triage;
   busy: boolean;
   onSave: (draft: string) => Promise<void>;
-  onApprove: () => Promise<void>;
+  onApprove: () => Promise<boolean>;
   onAccept?: (category: string, confirm?: boolean) => Promise<AcceptResult>;
   onLive?: () => Promise<void>;
+  onSnooze?: () => void;
+  onDone?: () => void;
   inCrm?: boolean;
+  actionRef?: RefObject<ReaderActions | null>;
 }) {
+  const draftRef = useRef<HTMLTextAreaElement>(null);
+  const localActions = useRef<ReaderActions | null>(null);
   const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
-  const [typed, setTyped] = useState("");
-  const [thinking, setThinking] = useState(true);
+  const [stream, setStream] = useState<{ id: number; saved: string; text: string; thinking: boolean } | null>(null);
   const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
   const [confirmState, setConfirmState] = useState<{
     id: number;
@@ -38,30 +63,74 @@ export function ApprovalCard({
     message: string;
     reasons: string[];
   } | null>(null);
-  const editing =
-    override && override.id === item.id && override.saved === item.draft_reply ? override : null;
+  const editing = override && override.id === item.id && override.saved === item.draft_reply ? override : null;
+  const live =
+    !item.edited && stream && stream.id === item.id && stream.saved === item.draft_reply ? stream : null;
+  const thinking = item.edited ? false : live ? live.thinking : true;
+  const typed = item.edited ? item.draft_reply : live ? live.text : "";
   const streaming = editing === null && typed.length < item.draft_reply.length;
   const draft = editing ? editing.text : streaming ? typed : item.draft_reply;
+  const note = noteState && noteState.id === item.id ? noteState.text : null;
+  const confirm = confirmState && confirmState.id === item.id ? confirmState : null;
+  const payment = (item.risk_flags || []).includes("payment_related");
+  const suspicious = item.category === "suspicious";
+  const canFile =
+    !confirm &&
+    !item.approved &&
+    !payment &&
+    !suspicious &&
+    !inCrm &&
+    item.category === "lead" &&
+    Boolean(onAccept);
+  const reviewLead =
+    !confirm &&
+    !item.approved &&
+    !payment &&
+    !suspicious &&
+    !inCrm &&
+    item.category === "review" &&
+    item.suggested_category === "lead" &&
+    Boolean(onAccept);
+  const reviewOther =
+    !confirm &&
+    !item.approved &&
+    !payment &&
+    !suspicious &&
+    item.category === "review" &&
+    Boolean(item.suggested_category) &&
+    item.suggested_category !== "lead" &&
+    Boolean(onAccept);
+  const primaryLabel = confirm
+    ? "Confirm and file"
+    : canFile || reviewLead
+      ? "Approve and file to CRM"
+      : reviewOther
+        ? `Accept as ${item.suggested_category}`
+        : ARCHIVE.has(item.category)
+          ? "Approve and archive"
+          : "Approve reply";
+  const canNotLead =
+    !item.approved &&
+    !confirm &&
+    Boolean(onAccept) &&
+    ["lead", "urgent", "invoice", "review"].includes(item.category);
+  const canPrimary = !busy && !item.approved;
 
   useEffect(() => {
-    if (item.edited) {
-      setTyped(item.draft_reply);
-      setThinking(false);
-      return;
-    }
-    setThinking(true);
-    setTyped("");
-    let cursor = 0;
+    if (item.edited) return;
     let tick = 0;
     const think = window.setTimeout(() => {
-      setThinking(false);
+      setStream({ id: item.id, saved: item.draft_reply, text: "", thinking: false });
+      let cursor = 0;
       tick = window.setInterval(() => {
         cursor = Math.min(item.draft_reply.length, cursor + 3);
-        setTyped(item.draft_reply.slice(0, cursor));
-        if (cursor >= item.draft_reply.length) {
-          window.clearInterval(tick);
-          setTyped(item.draft_reply);
-        }
+        setStream({
+          id: item.id,
+          saved: item.draft_reply,
+          text: item.draft_reply.slice(0, cursor),
+          thinking: false,
+        });
+        if (cursor >= item.draft_reply.length) window.clearInterval(tick);
       }, 16);
     }, 420);
     return () => {
@@ -69,8 +138,6 @@ export function ApprovalCard({
       window.clearInterval(tick);
     };
   }, [item.id, item.draft_reply, item.edited]);
-  const note = noteState && noteState.id === item.id ? noteState.text : null;
-  const confirm = confirmState && confirmState.id === item.id ? confirmState : null;
 
   function setDraft(text: string) {
     setOverride({ id: item.id, saved: item.draft_reply, text });
@@ -81,9 +148,9 @@ export function ApprovalCard({
   }
 
   const dirty = editing !== null && editing.text !== item.draft_reply;
-  const color = CATEGORY_COLOR[item.category] ?? "#1c1915";
-  const payment = (item.risk_flags || []).includes("payment_related");
-  const suspicious = item.category === "suspicious";
+  const confidence = confidencePresentation(
+    item.category === "review" ? (item.suggestion_confidence ?? item.confidence) : item.confidence,
+  );
 
   async function requestAccept(category: string, second = false) {
     if (!onAccept) return;
@@ -100,50 +167,117 @@ export function ApprovalCard({
     }
     setConfirmState(null);
     if (result.ok) {
-      setNote(category === "lead" ? "Filed in the CRM." : "Label accepted.");
+      if (category === "lead") toast.success("Filed to CRM (mock).");
+      else toast.success(category === "support" ? "Marked as support." : "Label accepted.");
+      onDone?.();
     } else if (result.message) {
       setNote(result.message);
     }
   }
 
+  async function doApprove() {
+    if (dirty) await onSave(draft);
+    const ok = await onApprove();
+    if (!ok) return;
+    const archived = ARCHIVE.has(item.category);
+    toast.success(archived ? "Archived." : "Reply approved.");
+    onDone?.();
+  }
+
+  function primary() {
+    if (!canPrimary) return;
+    if (confirm) {
+      void requestAccept(confirm.category, true);
+      return;
+    }
+    if (canFile || reviewLead) {
+      void requestAccept("lead");
+      return;
+    }
+    if (reviewOther && item.suggested_category) {
+      void requestAccept(item.suggested_category);
+      return;
+    }
+    void doApprove();
+  }
+
+  function edit() {
+    draftRef.current?.focus();
+  }
+
+  function notLead() {
+    if (!canNotLead) return;
+    void requestAccept("support");
+  }
+
+  const latest = useRef({ primary, edit, notLead, canNotLead, canPrimary, primaryLabel });
+  useEffect(() => {
+    latest.current = { primary, edit, notLead, canNotLead, canPrimary, primaryLabel };
+  });
+  useImperativeHandle(
+    actionRef ?? localActions,
+    () => ({
+      primary: () => latest.current.primary(),
+      edit: () => latest.current.edit(),
+      notLead: () => latest.current.notLead(),
+      get canNotLead() {
+        return latest.current.canNotLead;
+      },
+      get canPrimary() {
+        return latest.current.canPrimary;
+      },
+      get primaryLabel() {
+        return latest.current.primaryLabel;
+      },
+    }),
+    [],
+  );
+
   return (
-    <article className="flex min-h-full flex-col">
-      <header className="border-b border-border px-5 py-5 md:px-8">
-        <div className="flex flex-wrap items-center gap-3 text-xs tracking-[0.14em] uppercase">
-          <span className="inline-flex items-center gap-2" style={{ color }}>
-            <span className="size-2 rounded-full" style={{ background: color }} />
-            {categoryLabel(item.category)}
-          </span>
-          <span className="text-muted-foreground">
-            {Math.round(item.confidence * 100)}% confidence
-          </span>
-          <span className="text-muted-foreground">{shownModel(item.model)}</span>
-          <span className="text-muted-foreground">{formatWhen(item.received_at)}</span>
+    <article className="flex h-full min-h-0 flex-col">
+      <header className="border-b border-border px-4 py-4 md:px-5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusBadge tone={categoryTone(item.category)}>{categoryLabel(item.category)}</StatusBadge>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button type="button" className="rounded-sm">
+                <StatusBadge tone={confidence.tone}>{confidence.label}</StatusBadge>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {Math.round((item.suggestion_confidence ?? item.confidence) * 100)}% confidence.{" "}
+              {scoreSource(item.model)}
+            </TooltipContent>
+          </Tooltip>
+          <StatusBadge tone="neutral">{shownModel(item.model)}</StatusBadge>
+          {item.approved ? <StatusBadge tone="success">Approved</StatusBadge> : null}
         </div>
-        <h1 className="mt-3 font-serif text-3xl leading-tight tracking-tight">
-          {item.subject}
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {item.from_name || "Unknown sender"} · {item.from_email}
+        <h2 className="mt-3 text-lg font-semibold tracking-[-0.01em]" data-testid="reading-subject">
+          {item.subject || "No subject"}
+        </h2>
+        <p className="mt-1 truncate text-sm text-muted-foreground" title={`${item.from_name || ""} ${item.from_email || ""}`}>
+          {item.from_name || "Unknown sender"}
+          {item.from_email ? ` <${item.from_email}>` : ""}
+          {item.received_at ? ` · ${formatWhen(item.received_at)}` : ""}
         </p>
         {item.llm_error ? (
-          <p className="mt-2 text-xs text-muted-foreground">Rules fallback: {item.llm_error}</p>
+          <p className="mt-2 text-sm text-muted-foreground">Rules fallback: {item.llm_error}</p>
         ) : null}
         {payment ? (
-          <p className="mt-3 border border-border bg-card px-3 py-2 text-sm" role="status">
+          <p className="mt-3 rounded-md bg-warning-soft px-3 py-2 text-sm text-warning" role="status">
             payment-related: verify by phone
           </p>
         ) : null}
         {item.reasons && item.reasons.length > 0 ? (
-          <p className="mt-3 text-sm text-muted-foreground">
+          <p className="mt-3 max-w-[72ch] text-sm text-muted-foreground">
             {item.category === "review" && item.suggested_category
               ? `Suggested ${item.suggested_category}. `
-              : "Why: "}
-            {item.reasons.join(" · ")}
+              : "Why this label: "}
+            {item.reasons.join(", ")}
           </p>
         ) : null}
         {confirm ? (
-          <div className="mt-3 border border-border bg-card px-3 py-3 text-sm" role="status">
+          <div className="mt-3 rounded-md border border-border bg-surface px-3 py-3 text-sm" role="status">
             <p>{confirm.message}</p>
             {confirm.reasons.length > 0 ? (
               <ul className="mt-2 list-disc space-y-1 pl-5">
@@ -152,76 +286,34 @@ export function ApprovalCard({
                 ))}
               </ul>
             ) : null}
-            <Button
-              type="button"
-              className="mt-3"
-              disabled={busy || item.approved}
-              onClick={() => void requestAccept(confirm.category, true)}
-            >
-              Confirm and file
-            </Button>
-          </div>
-        ) : null}
-        {!confirm && !payment && !suspicious && item.category === "review" && item.suggested_category && onAccept ? (
-          <div className="mt-3">
-            <Button
-              type="button"
-              disabled={busy || item.approved}
-              onClick={() => void requestAccept(item.suggested_category || "")}
-            >
-              Accept as {item.suggested_category}
-            </Button>
-          </div>
-        ) : null}
-        {!confirm && !payment && !suspicious && item.category === "lead" && !inCrm && onAccept ? (
-          <div className="mt-3">
-            <Button type="button" disabled={busy || item.approved} onClick={() => void requestAccept("lead")}>
-              Accept and file in CRM
-            </Button>
           </div>
         ) : null}
       </header>
 
-      <div className="grid gap-6 px-5 py-5 md:px-8 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <div className="max-h-72 overflow-auto border border-border bg-card px-4 py-3 text-sm leading-6 whitespace-pre-wrap">
-          {item.body}
-        </div>
-        <dl className="grid grid-cols-2 gap-4 text-sm lg:grid-cols-1">
-          <Field label="Name" value={item.name} />
-          <Field label="Company" value={item.company} />
-          <Field label="Budget" value={item.budget} />
-          <Field label="Intent" value={item.intent} />
-        </dl>
-      </div>
-
-      <div className="flex flex-1 flex-col gap-3 px-5 pb-8 md:px-8">
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 className="text-sm tracking-[0.14em] uppercase text-muted-foreground">
-            {item.category === "spam" || item.category === "suspicious" || item.category === "review"
-              ? "Internal note"
-              : "Draft reply"}
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            {item.approved
-              ? "Approved"
-              : item.edited
-                ? "Edited, still waiting"
-                : "Waiting for a person"}
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 md:px-5">
+        <div className="max-w-[72ch] text-base leading-[22px] whitespace-pre-wrap">{item.body}</div>
+        <div className="mt-6 flex items-baseline justify-between gap-3">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            {ARCHIVE.has(item.category) ? "Internal note" : "Draft reply"}
+          </h3>
+          <p className="text-xs text-subtle-foreground">
+            {item.approved ? "Approved" : item.edited ? "Edited, still waiting" : "Waiting for a person"}
           </p>
         </div>
-        {thinking ? (
-          <p className="text-sm text-muted-foreground" role="status">
-            Reading the message…
-          </p>
-        ) : null}
+        <div aria-live="polite">
+          {thinking ? <p className="mt-2 text-sm text-muted-foreground">Reading the message…</p> : null}
+          {!thinking && streaming ? <p className="mt-2 text-sm text-muted-foreground">Drafting…</p> : null}
+        </div>
         <Textarea
+          ref={draftRef}
+          id="draft-reply"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          className="min-h-40 bg-card font-serif text-base leading-7"
-          aria-label="Draft reply"
+          className="mt-2 min-h-40 bg-background font-sans text-base leading-[22px]"
+          aria-label={ARCHIVE.has(item.category) ? "Internal note" : "Draft reply"}
         />
-        {item.category === "spam" || item.category === "suspicious" || item.category === "review" ? (
-          <p className="text-sm text-muted-foreground">
+        {ARCHIVE.has(item.category) ? (
+          <p className="mt-2 max-w-[72ch] text-sm text-muted-foreground">
             {item.category === "suspicious"
               ? "Held for a person. Do not pay, do not reply, and do not write this to the CRM."
               : item.category === "review"
@@ -231,39 +323,71 @@ export function ApprovalCard({
                 : "Spam is not answered and is not written to the CRM."}
           </p>
         ) : null}
-        <div className="flex flex-wrap gap-2">
-          {onLive ? (
-            <Button type="button" variant="outline" disabled={busy || item.approved} onClick={() => void onLive()}>
-              Classify with live AI
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!dirty || busy}
-            onClick={async () => {
-              await onSave(draft);
-              setNote("Draft saved.");
-            }}
-          >
-            Save edits
-          </Button>
-          <Button
-            type="button"
-            disabled={busy || item.approved}
-            onClick={async () => {
-              if (dirty) await onSave(draft);
-              await onApprove();
-              setNote(item.category === "spam" ? "Archived." : "Reply approved.");
-            }}
-          >
-            {item.category === "spam" || item.category === "suspicious" || item.category === "review"
-              ? "Approve and archive"
-              : "Approve reply"}
-          </Button>
-        </div>
-        {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}
+        {note ? <p className="mt-2 text-sm text-muted-foreground">{note}</p> : null}
       </div>
+
+      <footer className="flex flex-wrap items-center gap-2 border-t border-border px-4 py-3 md:px-5">
+        {canPrimary ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" size="lg" className="max-sm:w-full" onClick={primary} data-testid="primary-action">
+                {primaryLabel}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{primaryLabel} (⌘↵ or E)</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {onLive ? (
+          <Button type="button" variant="outline" disabled={busy || item.approved} onClick={() => void onLive()}>
+            Classify with live AI
+          </Button>
+        ) : null}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button type="button" variant="outline" onClick={edit}>
+              Edit draft
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Edit draft (R)</TooltipContent>
+        </Tooltip>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!dirty || busy}
+          onClick={async () => {
+            await onSave(draft);
+            setNote("Draft saved.");
+            toast.success("Draft saved.");
+          }}
+        >
+          Save edits
+        </Button>
+        {(canFile || reviewLead) && !confirm ? (
+          <Button type="button" variant="outline" disabled={!canPrimary} onClick={() => void doApprove()}>
+            Approve reply
+          </Button>
+        ) : null}
+        {canNotLead ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="outline" disabled={busy} onClick={notLead}>
+                Mark not a lead
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Mark not a lead (N). Files nothing. The label becomes support.</TooltipContent>
+          </Tooltip>
+        ) : null}
+        {onSnooze ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="outline" onClick={onSnooze}>
+                Snooze
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Snooze for this session (H)</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </footer>
     </article>
   );
 }
@@ -273,15 +397,4 @@ function shownModel(model: string) {
   if (model === "openai") return "OpenAI";
   if (model === "rules" || model === "rules-fallback") return "Demo";
   return model;
-}
-
-function Field({ label, value }: { label: string; value: string | null }) {
-  return (
-    <div>
-      <dt className="text-[11px] tracking-[0.14em] text-muted-foreground uppercase">
-        {label}
-      </dt>
-      <dd className="mt-1 leading-snug">{value || "Not stated"}</dd>
-    </div>
-  );
 }

@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, loadDesk, loadRecording } from "@/lib/api";
 import type { AcceptResult, Alert, Lead, Mail, Recording, Run, Stats, Triage, WorkerStatus } from "@/lib/types";
 
-export function useDesk() {
+function useDeskState() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [items, setItems] = useState<Triage[]>([]);
   const [pending, setPending] = useState<Mail[]>([]);
@@ -131,6 +131,10 @@ export function useDesk() {
     try {
       await api(`/triage/${id}/approve`, { method: "POST" });
       await refresh();
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not approve that reply.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -170,4 +174,19 @@ export function useDesk() {
     replayRecording,
     resetDemo,
   };
+}
+
+type Desk = ReturnType<typeof useDeskState>;
+
+const DeskContext = createContext<Desk | null>(null);
+
+export function DeskProvider({ children }: { children: ReactNode }) {
+  const value = useDeskState();
+  return <DeskContext.Provider value={value}>{children}</DeskContext.Provider>;
+}
+
+export function useDesk() {
+  const value = useContext(DeskContext);
+  if (!value) throw new Error("The desk is only available inside DeskProvider.");
+  return value;
 }

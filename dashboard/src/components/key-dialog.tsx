@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,26 +17,29 @@ const NOTE =
   "Your key is used only for this session and is never stored or logged. We recommend rotating or revoking the key after testing.";
 
 export function KeyDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        {open ? <KeyFields onClose={() => onOpenChange(false)} /> : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function KeyFields({ onClose }: { onClose: () => void }) {
   const session = useSessionKey();
   const [draft, setDraft] = useState(session.key);
   const [provider, setProvider] = useState<ProviderChoice>(session.provider);
   const detected = resolvedProvider(draft, provider);
 
-  useEffect(() => {
-    if (!open) return;
-    setDraft(session.key);
-    setProvider(session.provider);
-  }, [open, session.key, session.provider]);
-
   function save() {
     if (!draft.trim() || !detected) return;
     session.setKey(draft, provider);
-    onOpenChange(false);
+    onClose();
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+    <>
         <DialogHeader>
           <DialogTitle>Use your own API key</DialogTitle>
           <DialogDescription>{NOTE}</DialogDescription>
@@ -88,7 +91,6 @@ export function KeyDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             Use for this session
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </>
   );
 }

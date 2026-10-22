@@ -1,52 +1,79 @@
 "use client";
 
+import { Bell } from "lucide-react";
+import { DeskError } from "@/components/desk-error";
 import { DeskLogin } from "@/components/desk-login";
+import { EmptyState } from "@/components/empty-state";
 import { LaneShell } from "@/components/lane-shell";
-import { Metrics } from "@/components/metrics";
+import { StatusBadge, categoryTone } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useDelayed } from "@/components/use-delayed";
 import { useDesk } from "@/components/use-desk";
-import { CATEGORY_COLOR, categoryLabel, formatWhen } from "@/lib/types";
+import { categoryLabel, formatWhen } from "@/lib/types";
 
 export function AlertFeed() {
   const desk = useDesk();
+  const showSkeleton = useDelayed(desk.loading && desk.alerts.length === 0);
+
   if (desk.error === "unauthorized" && !desk.stats) {
     return <DeskLogin onDone={() => void desk.refresh()} />;
   }
+
   return (
-    <LaneShell stats={desk.stats}>
-      {desk.stats ? <Metrics stats={desk.stats} /> : null}
-      <section className="px-5 py-6 md:px-8">
-        <h1 className="font-serif text-3xl tracking-tight">#lane-inbox</h1>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-          This is the mock Slack webhook. Leads, urgent mail, support, and invoices are posted.
-          Spam stays quiet. Set SLACK_WEBHOOK_URL and the same text is delivered to a real channel.
-        </p>
-        {desk.loading && desk.alerts.length === 0 ? (
-          <p className="mt-8 text-sm text-muted-foreground">Loading alerts…</p>
-        ) : null}
-        {desk.error ? <p className="mt-6 text-sm text-muted-foreground">{desk.error}</p> : null}
-        {!desk.loading && desk.alerts.length === 0 ? (
-          <p className="mt-8 border border-dashed border-border px-4 py-8 text-sm text-muted-foreground">
-            No alerts yet. Run the worker to post the first one.
-          </p>
-        ) : null}
-        <ol className="mt-6 max-w-3xl space-y-3">
-          {desk.alerts.map((alert) => {
-            const color = CATEGORY_COLOR[alert.category || ""] ?? "#6b6258";
-            return (
-              <li key={alert.id} className="border border-border bg-card px-4 py-3">
-                <div className="flex items-baseline justify-between gap-3 text-xs">
-                  <span className="tracking-[0.14em] uppercase" style={{ color }}>
-                    Lane · {alert.category ? categoryLabel(alert.category) : "Note"}
+    <LaneShell>
+      <div className="flex h-full flex-col overflow-auto">
+        {desk.error ? <DeskError message={desk.error} onRetry={() => void desk.refresh()} /> : null}
+        <div className="flex justify-end px-4 py-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button type="button" variant="ghost">
+                Mock Slack
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end">
+              Leads, urgent mail, support, and invoices are posted. Spam stays quiet. Set SLACK_WEBHOOK_URL and the
+              same text goes to a real channel.
+            </PopoverContent>
+          </Popover>
+        </div>
+        {showSkeleton && desk.alerts.length === 0 ? (
+          <div className="space-y-2 px-4">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Skeleton key={index} className="h-14 w-full" />
+            ))}
+          </div>
+        ) : desk.alerts.length === 0 ? (
+          <EmptyState
+            icon={Bell}
+            title="No alerts yet"
+            body="Run the worker to post the first one."
+            action={
+              <Button type="button" variant="outline" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
+                Run worker now
+              </Button>
+            }
+          />
+        ) : (
+          <ul className="border-t border-border">
+            {desk.alerts.map((alert) => (
+              <li key={alert.id} className="border-b border-border px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <StatusBadge tone={alert.category ? categoryTone(alert.category) : "neutral"}>
+                    {alert.category ? categoryLabel(alert.category) : "Note"}
+                  </StatusBadge>
+                  <span className="ml-auto text-xs text-subtle-foreground tabular-nums">
+                    {formatWhen(alert.created_at)}
                   </span>
-                  <span className="text-muted-foreground">{formatWhen(alert.created_at)}</span>
                 </div>
-                <p className="mt-2 text-sm font-medium">{alert.title}</p>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">{alert.body}</p>
+                <p className="mt-1 text-sm font-medium">{alert.title}</p>
+                <p className="mt-0.5 text-sm text-muted-foreground">{alert.body}</p>
               </li>
-            );
-          })}
-        </ol>
-      </section>
+            ))}
+          </ul>
+        )}
+      </div>
     </LaneShell>
   );
 }
