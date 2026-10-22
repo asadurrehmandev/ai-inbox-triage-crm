@@ -21,8 +21,9 @@ from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email, select_provider
 from app.mailbox import mailbox_mode
-from app.pipeline import accept_suggestion, push_lead, readable_text, save_classification
-from app.risk import payment_related
+from app.gate import FilingBlocked, FilingConfirm, evaluate_filing
+from app.pipeline import accept_suggestion, push_lead, save_classification
+from app.replay import apply_recording, recording_status
 from app.db import AlreadyApproved, DraftLocked
 from app.llm import anthropic_model
 from app.seed import reset_demo, seed_if_empty
@@ -148,6 +149,7 @@ class DraftIn(BaseModel):
 
 class AcceptIn(BaseModel):
     category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious"] | None = None
+    confirm: bool = False
 
 
 class LeadIn(BaseModel):
@@ -419,18 +421,27 @@ def approve_reply(triage_id: int) -> dict:
 
 @app.post("/api/triage/{triage_id}/accept")
 def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
-    """One click applies the suggested label. Payment changes are still not filed."""
+    """Apply the reviewer's label. The filing gate, not this handler, decides."""
     row = db.get_triage(triage_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Triage record not found")
+    incoming = payload or AcceptIn()
     try:
-        outcome = accept_suggestion(row, payload.category if payload else None)
+        outcome = accept_suggestion(row, incoming.category, confirmed=incoming.confirm)
     except AlreadyApproved as exc:
         raise HTTPException(status_code=409, detail="already approved") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="no suggested label") from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail="payment-related: verify by phone") from exc
+    except FilingConfirm as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "confirm", "message": exc.message, "reasons": exc.reasons},
+        ) from exc
+    except FilingBlocked as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": exc.message, "reasons": exc.reasons},
+        ) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Triage record not found") from exc
     return outcome["triage"]
@@ -439,8 +450,22 @@ def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
 @app.post("/api/crm/leads")
 def create_lead(payload: LeadIn) -> dict:
     email = db.get_email(payload.email_id)
-    if email is not None and payment_related(readable_text(email)):
-        raise HTTPException(status_code=409, detail="payment-related: verify by phone")
+    if email is not None and payload.category == "lead":
+        stored_triage = db.get_triage_by_email(payload.email_id)
+        current = (stored_triage or {}).get("category") or "lead"
+        try:
+            evaluate_filing(
+                email,
+                current_category=current,
+                target="lead",
+                known_contacts=None,
+                confirmed=False,
+            ).raise_if_refused()
+        except FilingBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": exc.message, "reasons": exc.reasons},
+            ) from exc
     result = Classification(
         category=payload.category,
         confidence=1,
@@ -503,6 +528,24 @@ def create_alert(payload: AlertIn) -> dict:
 @app.get("/api/alerts")
 def alert_feed() -> dict:
     return {"alerts": db.list_alerts()}
+
+
+@app.get("/api/demo/recording")
+def demo_recording() -> dict:
+    if not _demo_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    return recording_status()
+
+
+@app.post("/api/demo/replay")
+def demo_replay() -> dict:
+    """Apply a recorded Claude pass. Refuses to invent one when the file is missing."""
+    if not _demo_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        return apply_recording()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Recorded Claude pass: no recording yet") from exc
 
 
 @app.post("/api/demo/reset")

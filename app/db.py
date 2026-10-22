@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS worker_lock (
   owner TEXT NOT NULL DEFAULT '',
   expires_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS filing_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  reasons TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 
@@ -454,6 +462,25 @@ def clear_all() -> None:
         conn.execute("DELETE FROM leads")
         conn.execute("DELETE FROM triage")
         conn.execute("DELETE FROM emails")
+        conn.execute("DELETE FROM filing_log")
+
+
+def insert_filing_log(email_id: str, action: str, reasons: list[str]) -> None:
+    with _LOCK, connect() as conn:
+        conn.execute(
+            "INSERT INTO filing_log (email_id, action, reasons, created_at) VALUES (?, ?, ?, ?)",
+            (email_id, action, json.dumps(reasons), now()),
+        )
+
+
+def list_filing_log() -> list[dict]:
+    rows = _rows("SELECT * FROM filing_log ORDER BY id")
+    for row in rows:
+        try:
+            row["reasons"] = json.loads(row.get("reasons") or "[]")
+        except json.JSONDecodeError:
+            row["reasons"] = []
+    return rows
 
 
 def count_fallbacks() -> int:

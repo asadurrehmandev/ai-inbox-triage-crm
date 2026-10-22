@@ -131,7 +131,8 @@ _HIDDEN_INSTRUCTION = re.compile(
 _PAYMENT_INVARIANT = re.compile(
     r"\b("
     r"wallets?|crypto(?:currency)?|usdt|tether|bitcoin|btc|ethereum|"
-    r"payees?|beneficiar(?:y|ies)|gift\s*cards?|"
+    r"payees?|beneficiar(?:y|ies)|gift\s*cards?|store\s+cards?|claim[-\s]?codes?|"
+    r"(?:app\s*store|itunes|google\s*play|play\s*store)\s+(?:gift\s*)?(?:cards?|codes?)|"
     r"routing\s+numbers?|account\s+numbers?|bank\s+accounts?|"
     r"card\s+numbers?|credit\s+cards?|debit\s+cards?|"
     r"update\s+our\s+details|pay(?:able)?\s+to|remit\s+to"
@@ -374,8 +375,9 @@ def payment_related(text: str) -> bool:
     """True when the text is about moving money or changing where it goes.
 
     Wallets, crypto, payees, beneficiaries, account and routing numbers, cards,
-    gift cards, and invoices that name a new pay-to all match. A product
-    description that only says IBAN or SWIFT does not.
+    gift cards, store cards, claim codes, and invoices that name a new pay-to
+    all match. A product description that only says IBAN or SWIFT does not.
+    Naming an app store without a card or a code does not match.
     """
     folded = fold(text or "")
     if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(folded):

@@ -89,6 +89,22 @@ export type WorkerStatus = {
   engine: string;
 };
 
+export type Recording = {
+  present: boolean;
+  label: string;
+  recorded_at?: string;
+  model?: string;
+  mailbox?: string;
+  count?: number;
+};
+
+export type AcceptResult = {
+  ok: boolean;
+  code: string;
+  message: string;
+  reasons: string[];
+};
+
 export type Alert = {
   id: number;
   email_id: string | null;

@@ -5,9 +5,10 @@ from __future__ import annotations
 from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email
+from app.gate import evaluate_filing, log_confirmed_filing
 from app.normalize import open_channels
 from app.prepare import html_to_text, strip_quotes
-from app.risk import blocks_autofile, hard_flags, payment_related
+from app.risk import hard_flags
 
 
 def record_from_email(email: dict, result: Classification) -> dict:
@@ -72,25 +73,59 @@ def _rules_mode(result: Classification) -> bool:
     return (result.model or "rules").startswith("rules")
 
 
-def apply_policy(email: dict, result: Classification) -> dict:
-    """Rules mode never writes the CRM. Claude may file a lead that is not about money."""
-    readable = readable_text(email)
-    if hard_flags(result.risk_flags):
-        result.category = "suspicious"
-    elif payment_related(readable) and result.category in {"lead", "urgent"}:
-        result.suggested_category = result.suggested_category or result.category
-        result.category = "review"
-        if "payment_related" not in result.risk_flags:
-            result.risk_flags = [*result.risk_flags, "payment_related"]
+def _known_contacts() -> list[dict]:
+    return [
+        {"name": row.get("name"), "email": row.get("email")}
+        for row in db.list_leads()
+        if row.get("email")
+    ]
+
+
+def apply_policy(email: dict, result: Classification, known_contacts: list[dict] | None = None) -> dict:
+    """Rules mode never writes the CRM. Claude uses the same gate as Accept.
+
+    The gate reads the message again. A wrong category or an empty flag list
+    does not open the CRM. confirmed is never passed here: auto-file cannot
+    supply the second confirm a person has to click.
+    """
+    contacts = _known_contacts() if known_contacts is None else known_contacts
+    wants_lead = (
+        result.category == "lead"
+        or result.suggested_category == "lead"
+        or "lead" in result.secondary_categories
+    )
+    if wants_lead:
+        decision = evaluate_filing(
+            email,
+            current_category=result.category,
+            target="lead",
+            known_contacts=contacts,
+            confirmed=False,
+        )
+        if decision.code == "payment":
+            result.suggested_category = result.suggested_category or "lead"
+            result.category = "review"
+            if "payment_related" not in result.risk_flags:
+                result.risk_flags = [*result.risk_flags, "payment_related"]
+            result.reasons = list(dict.fromkeys([*result.reasons, *decision.reasons]))
+        elif decision.code in {"security", "suspicious"}:
+            result.category = "suspicious"
+            extra = [reason for reason in decision.reasons if reason != "category is suspicious"]
+            result.risk_flags = list(dict.fromkeys([*result.risk_flags, *extra]))
+        elif decision.needs_confirm:
+            result.reasons = list(dict.fromkeys([*result.reasons, *decision.reasons]))
     triage = save_classification(email, result)
     lead = None
     alert = None
-    # The no-key engine is a demo. A person accepts every lead. Claude mode
-    # still refuses anything about moving money or changing where it goes.
-    if not _rules_mode(result):
-        categories = {result.category, *result.secondary_categories}
-        blocked = blocks_autofile(email, readable, result.risk_flags, result.budget, result.category)
-        if "lead" in categories and not blocked and not payment_related(readable):
+    if not _rules_mode(result) and result.category == "lead":
+        filed = evaluate_filing(
+            email,
+            current_category=result.category,
+            target="lead",
+            known_contacts=contacts,
+            confirmed=False,
+        )
+        if filed.allow and not hard_flags(result.risk_flags):
             lead = push_lead(email, result)
     if result.category != "spam":
         alert = notify(email, result)
@@ -108,14 +143,11 @@ def _email_fields(email: dict) -> dict:
     }
 
 
-def accept_suggestion(row: dict, category: str | None = None) -> dict:
-    """Apply the reviewer's label. Mail about moving money is refused."""
+def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool = False) -> dict:
+    """Apply the reviewer's label. The filing gate runs here, not in the button."""
     target = category or row.get("suggested_category")
     if target not in {"lead", "support", "invoice", "spam", "urgent", "suspicious"}:
         raise ValueError("no suggested label")
-    flags = [item for item in (row.get("risk_flags") or []) if item]
-    if isinstance(row.get("risk_flags"), str):
-        flags = [item for item in row["risk_flags"].split(",") if item]
     email = {
         "id": row["email_id"],
         "from_email": row.get("from_email"),
@@ -123,11 +155,16 @@ def accept_suggestion(row: dict, category: str | None = None) -> dict:
         "subject": row.get("subject"),
         "body": row.get("body") or "",
     }
-    readable = readable_text(email)
-    if "payment_related" in flags or payment_related(readable):
-        raise PermissionError("payment-related: verify by phone")
-    if target == "lead" and blocks_autofile(email, readable, flags, row.get("budget"), "lead"):
-        raise PermissionError("payment-related: verify by phone")
+    decision = evaluate_filing(
+        email,
+        current_category=row.get("category"),
+        target=target,
+        known_contacts=_known_contacts(),
+        confirmed=confirmed,
+    )
+    decision.raise_if_refused()
+    if decision.code == "confirmed":
+        log_confirmed_filing(str(row.get("email_id") or ""), decision.reasons)
     confidence = float(row.get("suggestion_confidence") or 0.7)
     updated = db.accept_category(row["id"], target, confidence)
     if updated is None:

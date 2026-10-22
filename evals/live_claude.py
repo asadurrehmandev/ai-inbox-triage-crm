@@ -2,6 +2,7 @@
 
     python -m evals.live_claude --set tests/new_emails_v3.py
     python -m evals.live_claude --set data/eval_fresh.json --out /tmp/live.json
+    python -m evals.live_claude --record demo/recorded_pass.json
 
 The set is a JSON list, or a Python file that defines EMAILS. Each item needs
 subject, body, from_name, and from_email. label, must_flag, name, company, and
@@ -143,6 +144,12 @@ def run(emails: list[dict]) -> dict:
                 "name": result.name,
                 "company": result.company,
                 "risk_flags": result.risk_flags,
+                "intent": result.intent,
+                "draft_reply": result.draft_reply,
+                "suggested_category": result.suggested_category,
+                "suggestion_confidence": result.suggestion_confidence,
+                "reasons": result.reasons,
+                "secondary_categories": result.secondary_categories,
                 "model": result.model,
                 "expected": expected,
                 "category_ok": result.category in email["label"] if email.get("label") else None,
@@ -170,19 +177,71 @@ def run(emails: list[dict]) -> dict:
     }
 
 
+def write_recording(report: dict, path: Path, source: Path) -> None:
+    """Store the rows a real Claude run returned. Nothing here is filled in by hand."""
+    from datetime import datetime, timezone
+
+    rows = []
+    for row in report.get("rows") or []:
+        if row.get("error") and not row.get("category"):
+            rows.append({"id": row.get("id"), "error": row.get("error")})
+            continue
+        rows.append(
+            {
+                "id": row.get("id"),
+                "category": row.get("category"),
+                "confidence": row.get("confidence"),
+                "name": row.get("name"),
+                "company": row.get("company"),
+                "budget": row.get("budget"),
+                "intent": row.get("intent") or "",
+                "draft_reply": row.get("draft_reply") or "",
+                "risk_flags": row.get("risk_flags") or [],
+                "suggested_category": row.get("suggested_category"),
+                "suggestion_confidence": row.get("suggestion_confidence"),
+                "reasons": row.get("reasons") or [],
+                "secondary_categories": row.get("secondary_categories") or [],
+                "model": report.get("model"),
+                "error": row.get("error"),
+            }
+        )
+    payload = {
+        "kind": "recorded-claude-pass",
+        "recorded_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "model": report.get("model"),
+        "mailbox": "sample mailbox",
+        "source": str(source),
+        "rows": rows,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Claude on a frozen mailbox and write JSON.")
-    parser.add_argument("--set", required=True, dest="set_path")
+    parser.add_argument("--set", default="", dest="set_path")
     parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--record",
+        default="",
+        help="Write a replayable Claude pass. With no --set, records data/sample_emails.json.",
+    )
     args = parser.parse_args(argv)
+    if not args.set_path and not args.record:
+        parser.error("--set is required unless --record is set")
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         print("ANTHROPIC_API_KEY is not set. Refusing to invent a score.", file=sys.stderr)
         return 2
-    path = Path(args.set_path)
+    path = Path(args.set_path) if args.set_path else Path(__file__).resolve().parents[1] / "data" / "sample_emails.json"
     emails = load_set(path)
     report = run(emails)
     out = Path(args.out) if args.out else path.with_suffix(".live.json")
-    out.write_text(json.dumps(report, indent=2))
+    if not args.record:
+        out.write_text(json.dumps(report, indent=2))
+    if args.record:
+        record_path = Path(args.record)
+        write_recording(report, record_path, path)
+        out = record_path
     print(
         f"{report['model']}  classification {report['classification']}  "
         f"attacks {report['attacks_suspicious']}  "

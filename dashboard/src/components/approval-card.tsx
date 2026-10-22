@@ -7,6 +7,7 @@ import {
   CATEGORY_COLOR,
   categoryLabel,
   formatWhen,
+  type AcceptResult,
   type Triage,
 } from "@/lib/types";
 
@@ -22,16 +23,23 @@ export function ApprovalCard({
   busy: boolean;
   onSave: (draft: string) => Promise<void>;
   onApprove: () => Promise<void>;
-  onAccept?: (category: string) => Promise<void>;
+  onAccept?: (category: string, confirm?: boolean) => Promise<AcceptResult>;
   inCrm?: boolean;
 }) {
   const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
   const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
+  const [confirmState, setConfirmState] = useState<{
+    id: number;
+    category: string;
+    message: string;
+    reasons: string[];
+  } | null>(null);
   const draft =
     override && override.id === item.id && override.saved === item.draft_reply
       ? override.text
       : item.draft_reply;
   const note = noteState && noteState.id === item.id ? noteState.text : null;
+  const confirm = confirmState && confirmState.id === item.id ? confirmState : null;
 
   function setDraft(text: string) {
     setOverride({ id: item.id, saved: item.draft_reply, text });
@@ -44,6 +52,28 @@ export function ApprovalCard({
   const dirty = draft !== item.draft_reply;
   const color = CATEGORY_COLOR[item.category] ?? "#1c1915";
   const payment = (item.risk_flags || []).includes("payment_related");
+  const suspicious = item.category === "suspicious";
+
+  async function requestAccept(category: string, second = false) {
+    if (!onAccept) return;
+    const result = await onAccept(category, second);
+    if (result.code === "confirm" && !second) {
+      setConfirmState({
+        id: item.id,
+        category,
+        message: result.message,
+        reasons: result.reasons,
+      });
+      setNoteState(null);
+      return;
+    }
+    setConfirmState(null);
+    if (result.ok) {
+      setNote(category === "lead" ? "Filed in the CRM." : "Label accepted.");
+    } else if (result.message) {
+      setNote(result.message);
+    }
+  }
 
   return (
     <article className="flex min-h-full flex-col">
@@ -81,20 +111,40 @@ export function ApprovalCard({
             {item.reasons.join(" · ")}
           </p>
         ) : null}
-        {!payment && item.category === "review" && item.suggested_category && onAccept ? (
+        {confirm ? (
+          <div className="mt-3 border border-border bg-card px-3 py-3 text-sm" role="status">
+            <p>{confirm.message}</p>
+            {confirm.reasons.length > 0 ? (
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {confirm.reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            ) : null}
+            <Button
+              type="button"
+              className="mt-3"
+              disabled={busy || item.approved}
+              onClick={() => void requestAccept(confirm.category, true)}
+            >
+              Confirm and file
+            </Button>
+          </div>
+        ) : null}
+        {!confirm && !payment && !suspicious && item.category === "review" && item.suggested_category && onAccept ? (
           <div className="mt-3">
             <Button
               type="button"
               disabled={busy || item.approved}
-              onClick={() => void onAccept(item.suggested_category || "")}
+              onClick={() => void requestAccept(item.suggested_category || "")}
             >
               Accept as {item.suggested_category}
             </Button>
           </div>
         ) : null}
-        {!payment && item.category === "lead" && !inCrm && onAccept ? (
+        {!confirm && !payment && !suspicious && item.category === "lead" && !inCrm && onAccept ? (
           <div className="mt-3">
-            <Button type="button" disabled={busy || item.approved} onClick={() => void onAccept("lead")}>
+            <Button type="button" disabled={busy || item.approved} onClick={() => void requestAccept("lead")}>
               Accept and file in CRM
             </Button>
           </div>

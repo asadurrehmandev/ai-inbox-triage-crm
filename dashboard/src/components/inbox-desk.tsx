@@ -90,6 +90,23 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
                 {desk.busy ? "Working" : "Run worker"}
               </Button>
             </div>
+            {desk.recording ? (
+              <div className="mx-5 mb-4 border border-border px-3 py-3 text-sm">
+                <p>{desk.recording.label}</p>
+                {!desk.recording.present ? (
+                  <p className="mt-1 text-xs text-muted-foreground">no recording yet</p>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-3"
+                  disabled={desk.busy || !desk.recording.present}
+                  onClick={() => void desk.replayRecording()}
+                >
+                  Replay recorded pass
+                </Button>
+              </div>
+            ) : null}
             {desk.pending.length > 0 ? (
               <div className="mx-5 mb-4 border border-dashed border-border px-3 py-2 text-sm">
                 <p className="text-[11px] tracking-[0.14em] text-muted-foreground uppercase">
@@ -162,7 +179,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
               busy={desk.busy}
               onSave={(draft) => desk.saveDraft(selected.id, draft)}
               onApprove={() => desk.approve(selected.id)}
-              onAccept={(category) => desk.acceptLabel(selected.id, category)}
+              onAccept={(category, confirm) => desk.acceptLabel(selected.id, category, confirm)}
               inCrm={desk.leads.some((lead) => lead.email_id === selected.email_id)}
             />
           ) : (

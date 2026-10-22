@@ -125,10 +125,12 @@ def test_payment_mail_is_not_filed_and_cannot_be_accepted(client):
         assert result.category != "urgent", email["id"]
         outcome = apply_policy(_row(email), result)
         assert outcome["lead"] is None, email["id"]
+        from app.gate import FilingBlocked
+
         try:
             accept_suggestion(db.get_triage(outcome["triage"]["id"]), "lead")
-        except PermissionError as exc:
-            assert "verify by phone" in str(exc)
+        except FilingBlocked as exc:
+            assert exc.message == "payment-related: verify by phone"
         else:
             raise AssertionError("accept should refuse payment mail")
     assert client.get("/api/crm/leads").json()["leads"] == []
@@ -137,7 +139,9 @@ def test_payment_mail_is_not_filed_and_cannot_be_accepted(client):
         json={"category": "lead"},
     )
     assert refused.status_code == 409
-    assert refused.json()["detail"] == "payment-related: verify by phone"
+    detail = refused.json()["detail"]
+    message = detail if isinstance(detail, str) else detail.get("message")
+    assert message == "payment-related: verify by phone"
 
 
 def test_claude_files_a_clean_lead_and_refuses_a_wallet(tmp_path, monkeypatch):

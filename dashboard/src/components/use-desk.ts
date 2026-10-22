@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, loadDesk } from "@/lib/api";
-import type { Alert, Lead, Mail, Run, Stats, Triage, WorkerStatus } from "@/lib/types";
+import { api, ApiError, loadDesk, loadRecording } from "@/lib/api";
+import type { AcceptResult, Alert, Lead, Mail, Recording, Run, Stats, Triage, WorkerStatus } from "@/lib/types";
 
 export function useDesk() {
   const [stats, setStats] = useState<Stats | null>(null);
@@ -12,6 +12,7 @@ export function useDesk() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [recording, setRecording] = useState<Recording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -26,6 +27,7 @@ export function useDesk() {
       setAlerts(feed.alerts);
       setWorker(nextWorker);
       setRuns(nextRuns.runs);
+      setRecording(await loadRecording());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "The triage API is not answering.");
@@ -70,16 +72,36 @@ export function useDesk() {
     }
   }
 
-  async function acceptLabel(id: number, category: string) {
+  async function acceptLabel(id: number, category: string, confirm = false): Promise<AcceptResult> {
     setBusy(true);
     try {
       await api(`/triage/${id}/accept`, {
         method: "POST",
-        body: JSON.stringify({ category }),
+        body: JSON.stringify({ category, confirm }),
       });
       await refresh();
+      return { ok: true, code: "ok", message: "", reasons: [] };
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not accept that label.");
+      const result: AcceptResult = {
+        ok: false,
+        code: err instanceof ApiError ? err.code : "",
+        message: err instanceof Error ? err.message : "Could not accept that label.",
+        reasons: err instanceof ApiError ? err.reasons : [],
+      };
+      if (result.code !== "confirm") setError(result.message);
+      return result;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function replayRecording() {
+    setBusy(true);
+    try {
+      await api("/demo/replay", { method: "POST" });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not replay the recorded pass.");
     } finally {
       setBusy(false);
     }
@@ -116,6 +138,7 @@ export function useDesk() {
     alerts,
     worker,
     runs,
+    recording,
     error,
     loading,
     busy,
@@ -124,6 +147,7 @@ export function useDesk() {
     saveDraft,
     approve,
     acceptLabel,
+    replayRecording,
     resetDemo,
   };
 }
