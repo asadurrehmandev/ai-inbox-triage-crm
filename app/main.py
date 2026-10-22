@@ -21,7 +21,7 @@ from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email, select_provider
 from app.mailbox import mailbox_mode
-from app.pipeline import push_lead, save_classification
+from app.pipeline import accept_suggestion, push_lead, save_classification
 from app.db import AlreadyApproved, DraftLocked
 from app.llm import anthropic_model
 from app.seed import reset_demo, seed_if_empty
@@ -143,6 +143,10 @@ class TriageIn(BaseModel):
 
 class DraftIn(BaseModel):
     draft_reply: str = Field(min_length=1)
+
+
+class AcceptIn(BaseModel):
+    category: Literal["lead", "support", "invoice", "spam", "urgent", "suspicious"] | None = None
 
 
 class LeadIn(BaseModel):
@@ -410,6 +414,25 @@ def approve_reply(triage_id: int) -> dict:
         body=f"Approved reply for {row['name'] or row['mailbox_name'] or 'the sender'} — {row['subject']}",
     )
     return db.public_triage(row, full_body=True)
+
+
+@app.post("/api/triage/{triage_id}/accept")
+def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
+    """One click applies the suggested label. Payment changes are still not filed."""
+    row = db.get_triage(triage_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+    try:
+        outcome = accept_suggestion(row, payload.category if payload else None)
+    except AlreadyApproved as exc:
+        raise HTTPException(status_code=409, detail="already approved") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="no suggested label") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail="this message asks for a payment change") from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Triage record not found") from exc
+    return outcome["triage"]
 
 
 @app.post("/api/crm/leads")

@@ -70,6 +70,21 @@ export function useDesk() {
     }
   }
 
+  async function acceptLabel(id: number, category: string) {
+    setBusy(true);
+    try {
+      await api(`/triage/${id}/accept`, {
+        method: "POST",
+        body: JSON.stringify({ category }),
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not accept that label.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function approve(id: number) {
     setBusy(true);
     try {
@@ -108,6 +123,7 @@ export function useDesk() {
     runIntake,
     saveDraft,
     approve,
+    acceptLabel,
     resetDemo,
   };
 }

@@ -8,5 +8,6 @@ data/*.db-shm
 data/*.db-wal
 dashboard/node_modules/
 dashboard/.next/
+dashboard/.desk-sessions.json
 *.egg-info/
 *.log

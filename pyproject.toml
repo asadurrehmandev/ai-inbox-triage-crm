@@ -21,7 +21,7 @@ dependencies = [
 dev = ["pytest>=8.3"]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "evals*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

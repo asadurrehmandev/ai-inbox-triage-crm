@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from app.budget import extract_budget
 from app.prepare import head_and_tail, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
-from app.risk import assess_risk, hard_flags
+from app.risk import assess_risk, hard_flags, money_movement
 
 CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review")
 
@@ -115,6 +115,9 @@ class Classification:
     contact_email: str | None = None
     llm_error: str | None = None
     model_suggestion: str | None = None
+    suggested_category: str | None = None
+    suggestion_confidence: float | None = None
+    reasons: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -132,6 +135,9 @@ class Classification:
             "contact_email": self.contact_email,
             "llm_error": self.llm_error,
             "model_suggestion": self.model_suggestion,
+            "suggested_category": self.suggested_category,
+            "suggestion_confidence": self.suggestion_confidence,
+            "reasons": list(self.reasons),
         }
 
 
@@ -140,17 +146,25 @@ def _plain(email: dict) -> str:
     return head_and_tail(f"{email.get('subject', '')}\n{body}")
 
 
-def _score(text: str, email: dict) -> dict[str, float]:
+def _score(text: str, email: dict) -> tuple[dict[str, float], list[str]]:
     scores = {name: 0.0 for name in ("lead", "support", "invoice", "spam", "urgent")}
+    reasons: list[str] = []
     lowered = text.lower()
     sender = (email.get("from_email") or "").lower()
 
+    def note(label: str) -> None:
+        if label not in reasons:
+            reasons.append(label)
+
     if re.search(r"\b(unsubscribe|opt out|manage preferences)\b", lowered):
         scores["spam"] += 3
+        note("unsubscribe or opt-out")
     if re.search(r"\b(click below to claim|limited time offer|you(?:'ve| have) been selected)\b", lowered):
         scores["spam"] += 5
+        note("promotional offer")
     if re.search(r"\b(lottery|inheritance|beneficiary|bitcoin giveaway|crypto wallet|viagra|guest post|work from home|seo package)\b", lowered):
         scores["spam"] += 5
+        note("unsolicited promotion")
     if re.search(r"\b10x your\b", lowered):
         scores["spam"] += 4
     if _COLD.search(lowered):
@@ -159,18 +173,24 @@ def _score(text: str, email: dict) -> dict[str, float]:
 
     if re.search(r"\b(invoice|rechnung|amount due|past due|payment due|net\s?\d+|remittance|payment received)\b", lowered):
         scores["invoice"] += 4
+        note("billing language")
     if re.search(r"\binv-\d+\b", lowered):
         scores["invoice"] += 3
+        note("invoice number")
+    if re.search(r"\b(we(?:'ve| have) wired|we have sent the payment|your receipt|payment of)\b", lowered):
+        scores["invoice"] += 4
+        note("a payment receipt")
     if _REFUND.search(lowered):
         scores["invoice"] += 6
         scores["lead"] -= 5
 
-    outage = re.search(r"\b(went down|is down|are down|production is down|outage)\b", lowered)
+    outage = re.search(r"\b(went down|is down|are down|production is down|outage|offline|not responding)\b", lowered)
     impact = re.search(r"\b(every|all|nobody|customers?|patients?|orders|shoppers?)\b", lowered)
     harm = re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered)
     http_error = re.search(r"\b5\d\d\b", lowered)
     if outage:
         scores["urgent"] += 6
+        note("a service is down")
     if http_error and impact and harm:
         scores["urgent"] += 6
     if re.search(r"\b(losing (?:orders|money|customers|patients))\b", lowered):
@@ -180,6 +200,7 @@ def _score(text: str, email: dict) -> dict[str, float]:
         lowered,
     ):
         scores["urgent"] += 5
+        note("a deadline is named")
     if re.search(r"\b(sev-?1|p0)\b", lowered):
         scores["urgent"] += 6
     immediacy = re.search(
@@ -202,6 +223,7 @@ def _score(text: str, email: dict) -> dict[str, float]:
 
     if re.search(r"\b(proposal|pricing|rfp|retainer|freelancer|sow|demo|spend|could you quote|a quote)\b", lowered):
         scores["lead"] += 4
+        note("asks for a proposal, quote, or retainer")
     if re.search(r"\b(hire|discovery call|set aside)\b", lowered):
         scores["lead"] += 3
     if re.search(r"\b(hourly|per hour|/hr|i can pay|we can pay)\b", lowered):
@@ -213,6 +235,7 @@ def _score(text: str, email: dict) -> dict[str, float]:
 
     if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
         scores["support"] += 4
+        note("a defect is described")
     if re.search(r"\berror\s?\d{3}\b", lowered) and not (http_error and impact and harm):
         scores["support"] += 4
     if re.search(r"\b(password reset|account locked|can't log ?in|cannot log ?in|won't download|blank screen)\b", lowered):
@@ -235,15 +258,15 @@ def _score(text: str, email: dict) -> dict[str, float]:
     if not (email.get("subject") or "").strip() and not html_to_text(email.get("body") or "").strip():
         scores["spam"] += 5
         scores["support"] -= 3
-    return scores
+    return scores, reasons[:4]
 
 
-def _choose(scores: dict[str, float]) -> tuple[str, list[str], float]:
+def _choose(scores: dict[str, float]) -> tuple[str, list[str], float, str | None, float]:
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     best_name, best = ranked[0]
     second = ranked[1][1]
     if best <= 0:
-        return "review", [], 0.35
+        return "review", [], 0.35, None, 0.0
     # A past-due invoice that only says "urgent" stays an invoice.
     if scores["invoice"] >= 4 and scores["invoice"] >= scores["urgent"] - 1 and best_name == "urgent":
         best_name, best = "invoice", scores["invoice"]
@@ -251,15 +274,17 @@ def _choose(scores: dict[str, float]) -> tuple[str, list[str], float]:
     # Lead, invoice, and urgent are filed only when the score is clear.
     # Anything weaker waits in the review queue instead of being guessed.
     close = best < 5 and second >= 3 and best - second < 2
+    margin = best - second
+    decided = max(0.55, min(0.97, 0.62 + margin * 0.05))
     if best < 4 or (best_name in {"lead", "urgent", "invoice"} and close):
-        return "review", [], round(min(0.49, 0.28 + best * 0.04), 2)
+        suggestion = best_name if best >= 2 else None
+        return "review", [], round(min(0.49, 0.28 + best * 0.04), 2), suggestion, round(decided, 2)
     secondary: list[str] = []
     if scores["lead"] >= 4 and scores["support"] >= 4 and best_name in {"lead", "support"}:
         other = "support" if best_name == "lead" else "lead"
         secondary.append(other)
-    margin = best - second
-    confidence = max(0.55, min(0.97, 0.62 + margin * 0.05))
-    return best_name, secondary, round(confidence, 2)
+    confidence = round(decided, 2)
+    return best_name, secondary, confidence, best_name, confidence
 
 
 def _name_tokens(value: str) -> list[str]:
@@ -440,7 +465,14 @@ def extract_intent(category: str, text: str) -> str:
     return "request a proposal"
 
 
-def draft_reply(category: str, name: str | None, intent: str, flags: list[str] | None = None) -> str:
+def draft_reply(
+    category: str,
+    name: str | None,
+    intent: str,
+    flags: list[str] | None = None,
+    suggested: str | None = None,
+    reasons: list[str] | None = None,
+) -> str:
     if category == "suspicious":
         listed = ", ".join(flags or ["suspicious"])
         return f"No reply. Flagged as suspicious: {listed}."
@@ -467,9 +499,17 @@ def draft_reply(category: str, name: str | None, intent: str, flags: list[str] |
             "Asad Rehman\nLane"
         )
     if category == "review":
+        hint = ""
+        if suggested:
+            why = ", ".join(reasons or [])
+            hint = f" Suggested label: {suggested}."
+            if why:
+                hint += f" Because: {why}."
         return (
             "Needs review. The rules were not confident enough to file this as a lead, "
-            "an invoice, or urgent. Nothing was written to the CRM.\n\n"
+            "an invoice, or urgent."
+            + hint
+            + " Nothing was written to the CRM.\n\n"
             "Asad Rehman\nLane"
         )
     if category == "urgent":
@@ -521,7 +561,8 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Cla
             forwarded_by=prepared.get("forwarded_by"),
             contact_email=prepared.get("from_email"),
         )
-    category, secondary, confidence = _choose(_score(text, prepared))
+    scores, reasons = _score(text, prepared)
+    category, secondary, confidence, suggested, suggestion_confidence = _choose(scores)
     name = extract_name(visible)
     company = extract_company(visible)
     auto = (prepared.get("auto_submitted") or "").lower()
@@ -529,9 +570,17 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Cla
         name = None
         company = None
     budget = extract_budget(text)
+    if budget and category == "review" and "a price is written in the message" not in reasons:
+        reasons = [*reasons, "a price is written in the message"]
     if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:
         budget = None
     intent = extract_intent(category, text)
+    # Payment-rail changes and wire requests are not auto-filed, and not urgent.
+    if not blocking and category in {"lead", "urgent"} and money_movement(text):
+        suggested = suggested or category
+        reasons = [*reasons, "asks to move money or change payment details"]
+        category = "review"
+        confidence = min(confidence, 0.45)
     return Classification(
         category=category,
         confidence=confidence,
@@ -539,12 +588,15 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Cla
         company=company,
         budget=budget,
         intent=intent,
-        draft_reply=draft_reply(category, name, intent),
+        draft_reply=draft_reply(category, name, intent, suggested=suggested, reasons=reasons),
         model="rules",
         risk_flags=flags,
         secondary_categories=secondary,
         forwarded_by=prepared.get("forwarded_by"),
         contact_email=prepared.get("from_email"),
+        suggested_category=suggested,
+        suggestion_confidence=suggestion_confidence,
+        reasons=reasons,
     )
 
 

@@ -19,8 +19,26 @@ _WORD_VALUES = {
     "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
     "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
 }
+_NUMWORD = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|"
+    "sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+)
 _WORD_AMOUNT = re.compile(
-    r"\b(?P<w>[a-z]+)\s+(?P<unit>hundred|thousand)\b(?:\s+(?P<cur>quid|dollars?|euros?|pounds?))?",
+    rf"\b(?P<words>(?:{_NUMWORD})(?:[-\s]+(?:{_NUMWORD})){{0,3}})\s+"
+    rf"(?P<unit>hundred|thousand)(?:\s+(?P<extra>hundred|thousand))?"
+    rf"(?:\s+(?:us\s+)?(?P<cur>quid|dollars?|euros?|pounds?|usd|eur|gbp))?",
+    re.IGNORECASE,
+)
+_CORRECTION = re.compile(
+    r"\bcorrect\b[^.\n]{0,80}?\bis\b[^.\n]{0,30}?(?P<amt>[$€£]\s?\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_WITHDRAWN = re.compile(
+    r"\b(?:ignore|disregard)\b[^.\n]{0,80}?(?P<amt>[$€£]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*k\b)",
+    re.IGNORECASE,
+)
+_NOT_AMOUNT = re.compile(
+    r"\bnot\s+(?P<amt>[$€£]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*k\b)",
     re.IGNORECASE,
 )
 _THOUSAND_RANGE = re.compile(
@@ -35,7 +53,7 @@ _BETWEEN_K = re.compile(
 _REAL = re.compile(rf"R\$\s?(?P<num>{_NUM})", re.IGNORECASE)
 _MXN = re.compile(rf"(?:MXN\s?(?P<num>{_NUM})|(?P<num2>{_NUM})\s*MXN)", re.IGNORECASE)
 _WORD_TAIL = re.compile(
-    rf"(?P<num>{_NUM})\s*(?P<cur>dollars?|quid|pounds?|euros?|reais)\b",
+    rf"(?P<num>{_NUM})\s*(?P<cur>dollars?|bucks|quid|pounds?|euros?|reais)\b",
     re.IGNORECASE,
 )
 
@@ -77,7 +95,7 @@ def _symbol(token: str) -> str:
     key = token.upper().replace("US$", "USD")
     return {
         "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$", "MXN": "MXN",
-        "DOLLAR": "$", "DOLLARS": "$", "QUID": "£", "POUND": "£", "POUNDS": "£",
+        "DOLLAR": "$", "DOLLARS": "$", "BUCKS": "$", "QUID": "£", "POUND": "£", "POUNDS": "£",
         "EURO": "€", "EUROS": "€", "REAIS": "R$",
         "$": "$", "€": "€", "£": "£", "R$": "R$",
     }.get(key, "$")
@@ -107,6 +125,38 @@ def _word_number(token: str) -> float | None:
     return _WORD_VALUES.get(token.lower())
 
 
+def _spoken_value(match: re.Match) -> float | None:
+    total = 0.0
+    for part in re.split(r"[-\s]+", match.group("words").lower()):
+        value = _word_number(part)
+        if value is None:
+            return None
+        total += value
+    unit = match.group("unit").lower()
+    factor = 100 if unit == "hundred" else 1000
+    extra = (match.group("extra") or "").lower()
+    if extra == "thousand":
+        factor *= 1000
+    elif extra == "hundred":
+        factor *= 100
+    return total * factor
+
+
+def _blank_span(text: str, start: int, end: int) -> str:
+    return text[:start] + (" " * (end - start)) + text[end:]
+
+
+def _without_withdrawn(text: str) -> str:
+    """Drop amounts the sender tells the reader to ignore, including 'not $X'."""
+    for pattern in (_WITHDRAWN, _NOT_AMOUNT):
+        while True:
+            match = pattern.search(text)
+            if not match:
+                break
+            text = _blank_span(text, match.start("amt"), match.end("amt"))
+    return text
+
+
 def _range(symbol: str, left: float, right: float) -> str:
     return f"{_fmt(symbol, left)}–{_fmt(symbol, right)}"
 
@@ -115,12 +165,17 @@ def extract_budget(text: str) -> str | None:
     """Return one normalized amount, or None when the text is not naming a price."""
     if not text:
         return None
+    corrected = _CORRECTION.search(text)
+    if corrected:
+        return _fmt(_symbol(corrected.group("amt")[:1]), parse_number(re.sub(r"[^\d.,]", "", corrected.group("amt"))))
+    text = _without_withdrawn(text)
     words = _WORD_AMOUNT.search(text)
-    if words and _word_number(words.group("w")) is not None:
-        base = _word_number(words.group("w")) or 0
-        factor = 100 if words.group("unit").lower() == "hundred" else 1000
+    spoken = _spoken_value(words) if words else None
+    if spoken is not None:
         symbol = _symbol(words.group("cur") or "$")
-        return _fmt(symbol, base * factor)
+        if not words.group("cur") and re.search(r"\beuros?\b", text[words.end() : words.end() + 24], re.I):
+            symbol = "€"
+        return _fmt(symbol, spoken)
     thousand_range = _THOUSAND_RANGE.search(text)
     if thousand_range:
         symbol = "€" if re.search(r"\beuros?\b", text, re.I) else "$"
@@ -177,6 +232,20 @@ def extract_budget(text: str) -> str | None:
             symbol = "£"
         return _fmt(symbol, float(bare.group("num")) * 1000)
     return None
+
+
+def amount_withdrawn(claimed: str, text: str) -> bool:
+    """True when this amount sits in an ignore, disregard, or 'not $X' correction."""
+    match = re.search(r"\d[\d,]*", (claimed or "").replace(" ", ""))
+    if not match or not text:
+        return False
+    digits = match.group(0).replace(",", "")
+    for pattern in (_WITHDRAWN, _NOT_AMOUNT):
+        for hit in pattern.finditer(text):
+            raw = re.sub(r"[^\d]", "", hit.group("amt"))
+            if raw == digits:
+                return True
+    return False
 
 
 def amount_in_text(claimed: str, visible: str) -> bool:

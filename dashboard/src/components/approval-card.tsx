@@ -15,11 +15,13 @@ export function ApprovalCard({
   busy,
   onSave,
   onApprove,
+  onAccept,
 }: {
   item: Triage;
   busy: boolean;
   onSave: (draft: string) => Promise<void>;
   onApprove: () => Promise<void>;
+  onAccept?: (category: string) => Promise<void>;
 }) {
   const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
   const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
@@ -62,6 +64,25 @@ export function ApprovalCard({
         </p>
         {item.llm_error ? (
           <p className="mt-2 text-xs text-muted-foreground">Rules fallback: {item.llm_error}</p>
+        ) : null}
+        {item.reasons && item.reasons.length > 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            {item.category === "review" && item.suggested_category
+              ? `Suggested ${item.suggested_category}. `
+              : "Why: "}
+            {item.reasons.join(" · ")}
+          </p>
+        ) : null}
+        {item.category === "review" && item.suggested_category && onAccept ? (
+          <div className="mt-3">
+            <Button
+              type="button"
+              disabled={busy || item.approved}
+              onClick={() => void onAccept(item.suggested_category || "")}
+            >
+              Accept as {item.suggested_category}
+            </Button>
+          </div>
         ) : null}
       </header>
 

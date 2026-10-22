@@ -38,6 +38,9 @@ export type Triage = {
   received_at: string | null;
   risk_flags?: string[];
   llm_error?: string | null;
+  suggested_category?: string | null;
+  suggestion_confidence?: number | null;
+  reasons?: string[];
 };
 
 export type Mail = {

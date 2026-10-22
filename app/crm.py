@@ -85,17 +85,40 @@ def _ensure_hubspot_properties(token: str) -> None:
             response.raise_for_status()
 
 
+def _hubspot_contact_id(token: str, email: str) -> str:
+    """The contact id for an address. Empty when HubSpot has no such contact."""
+    response = httpx.get(
+        f"https://api.hubapi.com/crm/v3/objects/contacts/{email}",
+        headers=_hubspot_headers(token),
+        params={"idProperty": "email"},
+        timeout=20,
+    )
+    if response.status_code == 404:
+        return ""
+    response.raise_for_status()
+    return str(response.json().get("id") or "")
+
+
 def _hubspot_note(token: str, email: str, lead: dict) -> None:
+    """Write budget and intent on a note associated to the contact, not a floating note."""
     note = f"Lane budget: {lead.get('budget') or 'none'}. Lane intent: {lead.get('intent') or 'none'}."
+    contact_id = _hubspot_contact_id(token, email)
+    associations = []
+    if contact_id:
+        associations.append(
+            {
+                "to": {"id": contact_id},
+                "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}],
+            }
+        )
     _post_retry(
         "https://api.hubapi.com/crm/v3/objects/notes",
         headers=_hubspot_headers(token),
         payload={
             "properties": {"hs_note_body": note, "hs_timestamp": db.now()},
-            "associations": [],
+            "associations": associations,
         },
     )
-    _ = email
 
 
 def _upsert_hubspot(token: str, email: str, properties: dict) -> httpx.Response:

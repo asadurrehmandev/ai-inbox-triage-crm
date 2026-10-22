@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from html.parser import HTMLParser
+
+from app.normalize import split_html
 
 _FORWARD = re.compile(
     r"(?:-{5,}\s*Forwarded message\s*-{5,}|-----Original Message-----)",
@@ -18,27 +19,16 @@ _WROTE = re.compile(r"^On .+ wrote:\s*$", re.IGNORECASE)
 _QUOTE_SPLIT = re.compile(r"\nOn .{0,180} wrote:\s*\n", re.IGNORECASE)
 
 
-class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self.parts.append(data)
-
-    def handle_starttag(self, tag: str, attrs: list) -> None:
-        if tag in {"br", "p", "div", "tr", "li"}:
-            self.parts.append("\n")
-
-
 def html_to_text(value: str) -> str:
-    if not value or "<" not in value or ">" not in value:
-        return value or ""
-    parser = _TextExtractor()
-    parser.feed(value)
-    parser.close()
-    text = "".join(parser.parts)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    """Visible text only. White-on-white, 1px, and comments are not included."""
+    visible, _hidden = split_html(value or "")
+    return visible
+
+
+def hidden_text(value: str) -> str:
+    """Text a reader does not see: comments, white ink, tiny type, display:none."""
+    _visible, hidden = split_html(value or "")
+    return hidden
 
 
 def unwrap_forward(email: dict) -> dict:

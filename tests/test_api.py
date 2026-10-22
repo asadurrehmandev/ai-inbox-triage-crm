@@ -388,3 +388,64 @@ def test_production_mode_refuses_the_sample_secrets(monkeypatch):
 
     with pytest.raises(RuntimeError):
         assert_runtime_secrets()
+
+
+def test_hubspot_note_is_associated_to_the_contact(monkeypatch):
+    import httpx
+
+    from app.crm import _hubspot_note
+
+    seen: dict = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, json={"id": "99"}, request=request)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["payload"] = json
+        request = httpx.Request("POST", url)
+        return httpx.Response(201, json={"id": "note-1"}, request=request)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "post", fake_post)
+    _hubspot_note("pat-test", "ada@example.com", {"budget": "$4,000", "intent": "hire"})
+    association = seen["payload"]["associations"][0]
+    assert association["to"]["id"] == "99"
+    assert association["types"][0]["associationTypeId"] == 202
+    assert "$4,000" in seen["payload"]["properties"]["hs_note_body"]
+
+
+def test_accept_moves_a_review_to_the_suggested_label(client):
+    from app import db
+
+    vague = {
+        "id": "review-me",
+        "from_name": "Imani Cole",
+        "from_email": "imani@colelogistics.com",
+        "subject": "got a minute?",
+        "body": "Around forty two hundred dollars for the Salesforce import.",
+        "received_at": "2026-10-22T00:00:00+00:00",
+    }
+    db.insert_email(vague)
+    stored = db.save_triage(
+        vague["id"],
+        {
+            "category": "review",
+            "confidence": 0.42,
+            "name": "Imani Cole",
+            "company": "Cole Logistics",
+            "budget": "$4,200",
+            "intent": "request a proposal",
+            "draft_reply": "Needs review.",
+            "model": "rules",
+            "suggested_category": "lead",
+            "suggestion_confidence": 0.66,
+            "reasons": ["a price is written in the message"],
+        },
+    )
+    response = client.post(f"/api/triage/{stored['id']}/accept", json={})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["category"] == "lead"
+    leads = client.get("/api/crm/leads").json()["leads"]
+    assert any(lead["email"] == "imani@colelogistics.com" for lead in leads)

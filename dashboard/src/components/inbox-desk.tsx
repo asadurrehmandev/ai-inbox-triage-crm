@@ -27,13 +27,17 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
   const [pickedId, setPickedId] = useState<number | null>(null);
 
   const visible = useMemo(() => {
-    return desk.items.filter((item) => {
+    const rows = desk.items.filter((item) => {
       if (filter === "approval") {
         return !item.approved && !["spam", "suspicious", "review"].includes(item.category);
       }
       if (filter === "all") return true;
       return item.category === filter;
     });
+    if (filter !== "review") return rows;
+    return [...rows].sort(
+      (a, b) => (b.suggestion_confidence ?? b.confidence) - (a.suggestion_confidence ?? a.confidence),
+    );
   }, [desk.items, filter]);
 
   const selectedId = useMemo(() => {
@@ -158,6 +162,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
               busy={desk.busy}
               onSave={(draft) => desk.saveDraft(selected.id, draft)}
               onApprove={() => desk.approve(selected.id)}
+              onAccept={(category) => desk.acceptLabel(selected.id, category)}
             />
           ) : (
             <p className="px-8 py-16 text-sm text-muted-foreground">
@@ -189,7 +194,11 @@ function QueueRow({ item }: { item: Triage }) {
       <span className="mt-1 flex gap-3 text-xs text-muted-foreground">
         <span>{item.company || "No company"}</span>
         <span>{item.budget || "No amount"}</span>
-        <span>{Math.round(item.confidence * 100)}%</span>
+        <span>
+          {item.category === "review" && item.suggested_category
+            ? `Suggest ${item.suggested_category} ${Math.round((item.suggestion_confidence ?? item.confidence) * 100)}%`
+            : `${Math.round(item.confidence * 100)}%`}
+        </span>
         <span>{item.approved ? "Approved" : formatWhen(item.received_at)}</span>
       </span>
     </span>

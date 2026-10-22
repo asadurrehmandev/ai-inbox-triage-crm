@@ -19,6 +19,10 @@ export function DeskLogin({ onDone }: { onDone: () => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
       });
+      if (response.status === 429) {
+        setError("Too many attempts. Wait a few minutes and try again.");
+        return;
+      }
       if (!response.ok) {
         setError("That password does not open the desk.");
         return;

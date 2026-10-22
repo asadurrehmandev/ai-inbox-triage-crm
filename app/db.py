@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -50,7 +51,10 @@ CREATE TABLE IF NOT EXISTS triage (
   risk_flags TEXT NOT NULL DEFAULT '',
   secondary_categories TEXT NOT NULL DEFAULT '',
   llm_error TEXT,
-  forwarded_by TEXT
+  forwarded_by TEXT,
+  suggested_category TEXT,
+  suggestion_confidence REAL,
+  reasons TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS leads (
@@ -139,6 +143,9 @@ def init_db() -> None:
             ("secondary_categories", "TEXT NOT NULL DEFAULT ''"),
             ("llm_error", "TEXT"),
             ("forwarded_by", "TEXT"),
+            ("suggested_category", "TEXT"),
+            ("suggestion_confidence", "REAL"),
+            ("reasons", "TEXT NOT NULL DEFAULT '[]'"),
         ):
             if column not in _columns(conn, "triage"):
                 conn.execute(f"ALTER TABLE triage ADD COLUMN {column} {ddl}")
@@ -224,8 +231,9 @@ def save_triage(email_id: str, result: dict, force: bool = False) -> dict:
             INSERT INTO triage (
               email_id, category, confidence, name, company, budget, intent,
               draft_reply, model, approved, edited, created_at,
-              risk_flags, secondary_categories, llm_error, forwarded_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+              risk_flags, secondary_categories, llm_error, forwarded_by,
+              suggested_category, suggestion_confidence, reasons
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(email_id) DO UPDATE SET
               category = excluded.category,
               confidence = excluded.confidence,
@@ -238,7 +246,10 @@ def save_triage(email_id: str, result: dict, force: bool = False) -> dict:
               risk_flags = excluded.risk_flags,
               secondary_categories = excluded.secondary_categories,
               llm_error = excluded.llm_error,
-              forwarded_by = excluded.forwarded_by
+              forwarded_by = excluded.forwarded_by,
+              suggested_category = excluded.suggested_category,
+              suggestion_confidence = excluded.suggestion_confidence,
+              reasons = excluded.reasons
             WHERE triage.approved = 0
             """,
             (
@@ -256,6 +267,9 @@ def save_triage(email_id: str, result: dict, force: bool = False) -> dict:
                 _csv(result.get("secondary_categories")),
                 result.get("llm_error"),
                 result.get("forwarded_by"),
+                result.get("suggested_category"),
+                result.get("suggestion_confidence"),
+                json.dumps(result.get("reasons") or []),
             ),
         )
             conn.execute(
@@ -512,4 +526,36 @@ def public_triage(row: dict, full_body: bool = False) -> dict:
         "secondary_categories": secondary,
         "llm_error": row.get("llm_error"),
         "forwarded_by": row.get("forwarded_by"),
+        "suggested_category": row.get("suggested_category") or None,
+        "suggestion_confidence": row.get("suggestion_confidence"),
+        "reasons": _reasons(row.get("reasons")),
     }
+
+
+def _reasons(raw: object) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return [str(raw)]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return []
+
+
+def accept_category(triage_id: int, category: str, confidence: float) -> dict | None:
+    """Record the reviewer's one-click label. An approved row is left alone."""
+    with _LOCK, connect() as conn:
+        row = conn.execute("SELECT approved FROM triage WHERE id = ?", (triage_id,)).fetchone()
+        if row is None:
+            return None
+        if row["approved"]:
+            raise AlreadyApproved(triage_id)
+        conn.execute(
+            "UPDATE triage SET category = ?, confidence = ? WHERE id = ?",
+            (category, confidence, triage_id),
+        )
+    return get_triage(triage_id)

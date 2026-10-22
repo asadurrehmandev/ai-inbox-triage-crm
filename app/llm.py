@@ -19,7 +19,7 @@ import time
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from app.budget import amount_in_text, extract_budget
+from app.budget import amount_in_text, amount_withdrawn, extract_budget
 from app.classifier import (
     CATEGORIES,
     Classification,
@@ -28,7 +28,7 @@ from app.classifier import (
     draft_reply,
 )
 from app.prepare import head_and_tail, html_to_text, strip_injection_notes, strip_quotes, unwrap_forward
-from app.risk import assess_risk, hard_flags
+from app.risk import assess_risk, hard_flags, money_movement
 
 logger = logging.getLogger("lane.llm")
 
@@ -116,9 +116,18 @@ def _user_prompt(email: dict) -> str:
     )
 
 
-def _backoff(attempt: int) -> None:
+def _backoff(attempt: int, response: httpx.Response | None = None) -> None:
     delay = float(os.environ.get("LLM_RETRY_BACKOFF", "0.4"))
-    time.sleep(delay * (2**attempt))
+    if response is not None:
+        header = response.headers.get("retry-after")
+        if header:
+            try:
+                delay = max(delay, float(header))
+            except ValueError:
+                delay = max(delay, 2.0)
+    if delay <= 0:
+        return
+    time.sleep(min(delay * (2**attempt), 60))
 
 
 def _post_with_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
@@ -133,7 +142,7 @@ def _post_with_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
             raise
         if response.status_code in {429, 500, 502, 503, 504, 529} and attempt < 2:
             last = response
-            _backoff(attempt)
+            _backoff(attempt, response)
             continue
         if last is not None and response.status_code >= 400:
             response.raise_for_status()
@@ -171,26 +180,45 @@ def _validate(payload: dict, model: str) -> Classification:
     return classification_from_payload(payload, model=model)
 
 
+def _anthropic_payload(email: dict) -> dict:
+    # Sonnet 5.5 rejects temperature and forced tool_choice (checked 2026-10-22).
+    # between_tools is the lowest thinking setting that model accepts.
+    return {
+        "model": anthropic_model(),
+        "max_tokens": 800,
+        "thinking": {"type": "between_tools"},
+        "output_config": {"effort": "low"},
+        "system": SYSTEM_PROMPT,
+        "tools": [TOOL],
+        "tool_choice": {"type": "auto"},
+        "messages": [{"role": "user", "content": _user_prompt(email)}],
+    }
+
+
+def _anthropic_headers() -> dict:
+    return {
+        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+
+def _usage(body: dict) -> dict:
+    usage = body.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "http_calls": 1,
+    }
+
+
 def _anthropic(email: dict) -> Classification:
     response = _post_with_retry(
         "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        payload={
-            # Sonnet 5.5 rejects temperature and forced tool_choice (checked 2026-10-22).
-            # between_tools is the lowest thinking setting that model accepts.
-            "model": anthropic_model(),
-            "max_tokens": 800,
-            "thinking": {"type": "between_tools"},
-            "output_config": {"effort": "low"},
-            "system": SYSTEM_PROMPT,
-            "tools": [TOOL],
-            "tool_choice": {"type": "auto"},
-            "messages": [{"role": "user", "content": _user_prompt(email)}],
-        },
+        headers=_anthropic_headers(),
+        payload=_anthropic_payload(email),
     )
     return _validate(_tool_payload(response.json()), model="anthropic")
 
@@ -251,6 +279,9 @@ def apply_model_guard(result: Classification, email: dict, ruled: Classification
         return result
     claimed = result.budget
     parsed = extract_budget(visible)
+    if claimed and parsed and amount_withdrawn(claimed, visible):
+        result.budget = parsed
+        claimed = parsed
     if claimed and not amount_in_text(claimed, visible):
         if parsed:
             # The body names a price. Keep that amount and the model's category.
@@ -286,9 +317,47 @@ def apply_model_guard(result: Classification, email: dict, ruled: Classification
     if re.search(r"\b(i will pay|payment has been sent|i have paid|wire the funds)\b", result.draft_reply, re.I):
         result.category = "review"
         result.draft_reply = "Needs review. The draft was discarded because it promised a payment."
+    if result.category == "urgent" and (blocking or money_movement(visible)):
+        result.category = "suspicious" if blocking else "review"
+    if result.category == "lead" and money_movement(visible):
+        result.suggested_category = result.suggested_category or "lead"
+        result.model_suggestion = result.model_suggestion or "lead"
+        result.category = "review"
+    if not result.suggested_category:
+        result.suggested_category = ruled.suggested_category
+        result.suggestion_confidence = ruled.suggestion_confidence
+    if not result.reasons:
+        result.reasons = list(ruled.reasons)
     if not result.secondary_categories:
         result.secondary_categories = ruled.secondary_categories
     return result
+
+
+def classify_live(email: dict, known_contacts: list[dict] | None = None) -> tuple[Classification, dict]:
+    """One guarded Claude call, plus token usage for a cost report.
+
+    Suspicious mail is decided by the rules and does not spend a request.
+    """
+    bounded = _bounded_email(email)
+    ruled = classify_rules(bounded, known_contacts)
+    empty = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "http_calls": 0,
+        "skipped": "rules" if ruled.category == "suspicious" else select_provider(),
+    }
+    if ruled.category == "suspicious" or select_provider() != "anthropic":
+        return ruled, empty
+    response = _post_with_retry(
+        "https://api.anthropic.com/v1/messages",
+        headers=_anthropic_headers(),
+        payload=_anthropic_payload(bounded),
+    )
+    body = response.json()
+    result = _validate(_tool_payload(body), model="anthropic")
+    return apply_model_guard(result, bounded, ruled), _usage(body)
 
 
 def classify_email(email: dict, known_contacts: list[dict] | None = None) -> Classification:
