@@ -107,6 +107,25 @@ export function useDesk() {
     }
   }
 
+  async function classifyLive(id: number, key: string, provider: string | null) {
+    setBusy(true);
+    try {
+      const headers: Record<string, string> = { "X-Lane-Key": key };
+      if (provider) headers["X-Lane-Provider"] = provider;
+      const result = await api<{ triage: Triage; mode: string; notice: string | null }>(
+        `/triage/${id}/live`,
+        { method: "POST", headers },
+      );
+      await refresh();
+      return result;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Live AI did not answer.");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function approve(id: number) {
     setBusy(true);
     try {
@@ -147,6 +166,7 @@ export function useDesk() {
     saveDraft,
     approve,
     acceptLabel,
+    classifyLive,
     replayRecording,
     resetDemo,
   };

@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ApprovalCard } from "@/components/approval-card";
+import { resolvedProvider, useSessionKey } from "@/components/session-key";
 import { LaneShell } from "@/components/lane-shell";
 import { Metrics } from "@/components/metrics";
 import { DeskLogin } from "@/components/desk-login";
@@ -22,6 +23,7 @@ const FILTERS = [
 
 export function InboxDesk({ focusId }: { focusId?: number }) {
   const desk = useDesk();
+  const session = useSessionKey();
   const router = useRouter();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("approval");
   const [pickedId, setPickedId] = useState<number | null>(null);
@@ -180,6 +182,15 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
               onSave={(draft) => desk.saveDraft(selected.id, draft)}
               onApprove={() => desk.approve(selected.id)}
               onAccept={(category, confirm) => desk.acceptLabel(selected.id, category, confirm)}
+              onLive={
+                session.live
+                  ? async () => {
+                      const provider = resolvedProvider(session.key, session.provider);
+                      const result = await desk.classifyLive(selected.id, session.key, provider);
+                      if (result?.notice && result.mode === "demo") session.markDemo(result.notice);
+                    }
+                  : undefined
+              }
               inCrm={desk.leads.some((lead) => lead.email_id === selected.email_id)}
             />
           ) : (

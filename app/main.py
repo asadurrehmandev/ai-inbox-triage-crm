@@ -19,7 +19,7 @@ load_dotenv()
 
 from app import alerts, crm, db
 from app.classifier import Classification
-from app.llm import classify_email, select_provider
+from app.llm import DEMO_LIMIT_NOTICE, classify_email, classify_for_visitor, select_provider
 from app.mailbox import mailbox_mode
 from app.gate import FilingBlocked, FilingConfirm, evaluate_filing
 from app.pipeline import accept_suggestion, push_lead, save_classification
@@ -340,8 +340,17 @@ def complete(email_id: str) -> dict:
     return {"email_id": email_id, "status": "triaged"}
 
 
+def _visitor_credentials(request: Request) -> tuple[str, str | None]:
+    """The visitor key stays on this request. It is not logged or stored."""
+    secret = (request.headers.get("x-lane-key") or "").strip()
+    hint = (request.headers.get("x-lane-provider") or "").strip().lower() or None
+    if hint not in {None, "anthropic", "openai"}:
+        hint = None
+    return secret, hint
+
+
 @app.post("/api/classify")
-def classify(payload: EmailIn) -> dict:
+def classify(payload: EmailIn, request: Request) -> dict:
     if payload.email_id and not (payload.subject or payload.body):
         email = _email_or_404(payload.email_id)
     else:
@@ -352,6 +361,35 @@ def classify(payload: EmailIn) -> dict:
             "from_name": payload.from_name,
             "from_email": payload.from_email,
         }
+    secret, hint = _visitor_credentials(request)
+    if not (payload.subject or payload.body or "").strip() and not payload.email_id and not secret:
+        return {
+            "email_id": payload.email_id,
+            "subject": payload.subject,
+            "from_name": payload.from_name,
+            "from_email": payload.from_email,
+            "category": "review",
+            "confidence": 0.35,
+            "name": None,
+            "company": None,
+            "budget": None,
+            "intent": "review a message",
+            "draft_reply": DEMO_LIMIT_NOTICE,
+            "model": "rules",
+            "mode": "demo",
+            "notice": DEMO_LIMIT_NOTICE,
+        }
+    if secret:
+        outcome = classify_for_visitor(email, secret, hint)
+        return {
+            "email_id": email.get("id"),
+            "subject": email.get("subject"),
+            "from_name": email.get("from_name"),
+            "from_email": email.get("from_email"),
+            "mode": outcome.mode,
+            "notice": outcome.notice,
+            **outcome.result.as_dict(),
+        }
     result = classify_email(email)
     return {
         "email_id": email.get("id"),
@@ -359,6 +397,33 @@ def classify(payload: EmailIn) -> dict:
         "from_name": email.get("from_name"),
         "from_email": email.get("from_email"),
         **result.as_dict(),
+    }
+
+
+@app.post("/api/triage/{triage_id}/live")
+def live_pass(triage_id: int, request: Request) -> dict:
+    """Reclassify one stored message with a key that is not kept after the call."""
+    row = db.get_triage(triage_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+    if row["approved"]:
+        raise HTTPException(status_code=409, detail="already approved")
+    secret, hint = _visitor_credentials(request)
+    if not secret:
+        raise HTTPException(
+            status_code=400,
+            detail="Add an API key to run live AI. Demo mode is still available.",
+        )
+    email = _email_or_404(row["email_id"])
+    outcome = classify_for_visitor(email, secret, hint)
+    if outcome.mode != "demo":
+        save_classification(email, outcome.result)
+        refreshed = db.get_triage(triage_id)
+        row = refreshed or row
+    return {
+        "triage": db.public_triage(row, full_body=True),
+        "mode": outcome.mode,
+        "notice": outcome.notice,
     }
 
 

@@ -1,6 +1,6 @@
 """Claude requests are validated. A failed call is a visible rules fallback."""
 
-import json
+import json as json_module
 
 import httpx
 import pytest
@@ -142,6 +142,37 @@ def test_invented_budget_is_not_trusted(monkeypatch):
     assert "90,000" in result.draft_reply
 
 
+def test_openai_uses_the_same_decision_schema(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF", "0")
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["url"] = url
+        sent["json"] = json
+        sent["headers"] = headers
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json_module.dumps(GOOD)}}]},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = classify_email(EMAIL)
+    schema = sent["json"]["response_format"]["json_schema"]
+    assert result.model == "openai"
+    assert sent["url"] == "https://api.openai.com/v1/chat/completions"
+    assert sent["json"]["response_format"]["type"] == "json_schema"
+    assert schema["name"] == "record_triage"
+    assert schema["strict"] is True
+    assert schema["schema"]["properties"]["category"]["enum"]
+    assert schema["schema"]["additionalProperties"] is False
+    assert "draft_reply" in schema["schema"]["required"]
+    assert result.category == "lead"
+
+
 def test_suspicious_mail_does_not_call_the_model(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     called = {"n": 0}
@@ -161,4 +192,4 @@ def test_suspicious_mail_does_not_call_the_model(monkeypatch):
     assert result.category == "suspicious"
     assert result.model == "rules"
     assert called["n"] == 0
-    assert json.dumps(result.as_dict())
+    assert json_module.dumps(result.as_dict())

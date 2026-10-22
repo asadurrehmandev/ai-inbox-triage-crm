@@ -132,10 +132,9 @@ export function categoryLabel(category: string) {
 }
 
 export function modeLabel(mode: string) {
-  if (mode === "anthropic") return "Claude";
-  if (mode === "openai") return "OpenAI";
-  if (mode === "rules-fallback") return "Rules fallback";
-  return "Rules demo · no API key";
+  if (mode === "anthropic") return "Live AI (Claude)";
+  if (mode === "openai") return "Live AI (OpenAI)";
+  return "Demo mode: sample responses. Add your API key for live AI.";
 }
 
 export function cadence(seconds: number) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -17,6 +17,7 @@ export function ApprovalCard({
   onSave,
   onApprove,
   onAccept,
+  onLive,
   inCrm = false,
 }: {
   item: Triage;
@@ -24,9 +25,12 @@ export function ApprovalCard({
   onSave: (draft: string) => Promise<void>;
   onApprove: () => Promise<void>;
   onAccept?: (category: string, confirm?: boolean) => Promise<AcceptResult>;
+  onLive?: () => Promise<void>;
   inCrm?: boolean;
 }) {
   const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
+  const [typed, setTyped] = useState("");
+  const [thinking, setThinking] = useState(true);
   const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
   const [confirmState, setConfirmState] = useState<{
     id: number;
@@ -34,10 +38,37 @@ export function ApprovalCard({
     message: string;
     reasons: string[];
   } | null>(null);
-  const draft =
-    override && override.id === item.id && override.saved === item.draft_reply
-      ? override.text
-      : item.draft_reply;
+  const editing =
+    override && override.id === item.id && override.saved === item.draft_reply ? override : null;
+  const streaming = editing === null && typed.length < item.draft_reply.length;
+  const draft = editing ? editing.text : streaming ? typed : item.draft_reply;
+
+  useEffect(() => {
+    if (item.edited) {
+      setTyped(item.draft_reply);
+      setThinking(false);
+      return;
+    }
+    setThinking(true);
+    setTyped("");
+    let cursor = 0;
+    let tick = 0;
+    const think = window.setTimeout(() => {
+      setThinking(false);
+      tick = window.setInterval(() => {
+        cursor = Math.min(item.draft_reply.length, cursor + 3);
+        setTyped(item.draft_reply.slice(0, cursor));
+        if (cursor >= item.draft_reply.length) {
+          window.clearInterval(tick);
+          setTyped(item.draft_reply);
+        }
+      }, 16);
+    }, 420);
+    return () => {
+      window.clearTimeout(think);
+      window.clearInterval(tick);
+    };
+  }, [item.id, item.draft_reply, item.edited]);
   const note = noteState && noteState.id === item.id ? noteState.text : null;
   const confirm = confirmState && confirmState.id === item.id ? confirmState : null;
 
@@ -49,7 +80,7 @@ export function ApprovalCard({
     setNoteState({ id: item.id, text });
   }
 
-  const dirty = draft !== item.draft_reply;
+  const dirty = editing !== null && editing.text !== item.draft_reply;
   const color = CATEGORY_COLOR[item.category] ?? "#1c1915";
   const payment = (item.risk_flags || []).includes("payment_related");
   const suspicious = item.category === "suspicious";
@@ -86,7 +117,7 @@ export function ApprovalCard({
           <span className="text-muted-foreground">
             {Math.round(item.confidence * 100)}% confidence
           </span>
-          <span className="text-muted-foreground">{item.model}</span>
+          <span className="text-muted-foreground">{shownModel(item.model)}</span>
           <span className="text-muted-foreground">{formatWhen(item.received_at)}</span>
         </div>
         <h1 className="mt-3 font-serif text-3xl leading-tight tracking-tight">
@@ -178,6 +209,11 @@ export function ApprovalCard({
                 : "Waiting for a person"}
           </p>
         </div>
+        {thinking ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            Reading the message…
+          </p>
+        ) : null}
         <Textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -196,6 +232,11 @@ export function ApprovalCard({
           </p>
         ) : null}
         <div className="flex flex-wrap gap-2">
+          {onLive ? (
+            <Button type="button" variant="outline" disabled={busy || item.approved} onClick={() => void onLive()}>
+              Classify with live AI
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="outline"
@@ -225,6 +266,13 @@ export function ApprovalCard({
       </div>
     </article>
   );
+}
+
+function shownModel(model: string) {
+  if (model === "anthropic") return "Claude";
+  if (model === "openai") return "OpenAI";
+  if (model === "rules" || model === "rules-fallback") return "Demo";
+  return model;
 }
 
 function Field({ label, value }: { label: string; value: string | null }) {

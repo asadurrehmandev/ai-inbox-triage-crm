@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "02",
     title: "Classify",
-    copy: "Claude classifies the message. With no API key, a conservative rules demo fills in.",
+    copy: "Demo mode drafts from the sample pipeline. Paste a key and Claude or OpenAI classifies the message.",
   },
   {
     n: "03",
@@ -31,7 +31,7 @@ const STEPS = [
   {
     n: "05",
     title: "CRM",
-    copy: "Rules mode never writes the CRM. A person accepts the lead. Claude files one only when the mail is not about moving money.",
+    copy: "Demo mode never writes the CRM. A person accepts the lead. Live AI files one only when the mail is not about moving money.",
   },
   {
     n: "06",

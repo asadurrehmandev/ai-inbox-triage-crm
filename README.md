@@ -1,6 +1,8 @@
 # AI Inbox Triage to CRM (Python + Claude)
 
-Lane reads a client's inbox, classifies each message with Claude, and extracts the name, company, budget, and intent. It drafts a reply and stops. A person approves that draft and accepts the lead before anything is written to HubSpot or GoHighLevel.
+Runs out of the box in Demo mode with sample responses; paste your own Anthropic or OpenAI key (never stored) to test the live AI.
+
+Lane reads a client's inbox, classifies each message, and extracts the name, company, budget, and intent. It drafts a reply and stops. A person approves that draft and accepts the lead before anything is written to HubSpot or GoHighLevel. Demo mode uses the deterministic pipeline and sample wording. It does not call Claude or OpenAI. Live mode does, with the key you paste or with `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on a host you control.
 
 The wait is the point. Sorting mail is cheap. Filing the wrong person, or paying the wrong account, is not. The Accept button is not the gate. The server reads the original message again and refuses a suspicious row, a payee change, or a request to move money, including when the stored label says lead and including when someone clicks a second time. With no API key, the rules demo never files a lead on its own. With a key, Claude may file a lead, and only a lead, and only through that same gate. Payment mail is verified by phone.
 
@@ -17,7 +19,7 @@ docker compose up --build
 
 Open [the desk](http://127.0.0.1:8742) and sign in with `lane-demo`. The sample `.env` sets `DEMO_MODE=true`, which is what allows the sample `API_TOKEN`, `WEBHOOK_SECRET`, and `DASHBOARD_PASSWORD` to boot. Compose publishes `127.0.0.1:8741` and `127.0.0.1:8742` only. For a client deployment, replace those three secrets and set `DEMO_MODE=false`.
 
-Leave `ANTHROPIC_API_KEY` empty to click through on the rules demo. The sidebar says "Rules demo · no API key". That mode is a conservative stand-in. Claude is the classifier. Add an Anthropic key and the next pass calls `claude-sonnet-5-5`. This repo does not ship a recorded Claude pass. Until `demo/recorded_pass.json` exists, the desk shows **Recorded Claude pass: no recording yet**.
+Leave both model keys empty to click through in Demo mode. The desk badge reads "Demo mode: sample responses. Add your API key for live AI." Open **API key**, paste an Anthropic or OpenAI key, and the badge switches to "Live AI (Claude)" or "Live AI (OpenAI)". Your key is used only for this session and is never stored or logged. We recommend rotating or revoking the key after testing. A rejected key, or one with no quota, falls back to Demo mode and says so. Self-hosting can still set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. The Anthropic model defaults to `claude-sonnet-5-5`. The OpenAI model defaults to `gpt-4o-mini` and is changed with `OPENAI_MODEL`. This repo does not ship a recorded Claude pass. Until `demo/recorded_pass.json` exists, the desk shows **Recorded Claude pass: no recording yet**.
 
 Without Docker, from a Python 3.11+ and Node 20.9+ machine:
 
@@ -50,7 +52,7 @@ In another terminal: `cd dashboard && npm install && npm run dev`, then open htt
 
 ## Scores
 
-`pytest` prints these. They are the rules demo, not a Claude score. None of these files is a sealed holdout. A live Claude number is not included, because this repo has no recording.
+`pytest` prints these. **Measured in Demo mode**, on the deterministic pipeline. They are not a live Claude or OpenAI score. None of these files is a sealed holdout. A live model number is not included, because this repo has no recording.
 
 | Set | Result |
 | --- | --- |
@@ -119,7 +121,7 @@ Chasing each of those with another phrase list is the arms race this desk stops 
 
 1. Mail arrives on `POST /api/webhooks/email`, or the worker polls IMAP for anything unseen. The demo uses a labeled sample feed instead of a live mailbox.
 2. The message is normalized before any rule runs: zero-width and bidi characters are stripped, off-screen and hidden HTML is dropped, and base64, quoted-printable, and HTML-entity runs are decoded. Concealed prose is flagged.
-3. Claude, or the rules demo, suggests **lead, support, invoice, spam, urgent, suspicious, or needs review**, and extracts **name, company, budget, and intent**. Urgent requires a known sender or an existing reply thread, plus an outage or a deadline. A first contact does not jump the queue.
+3. Demo mode, or live Claude / OpenAI when a key is present, suggests **lead, support, invoice, spam, urgent, suspicious, or needs review**, and extracts **name, company, budget, and intent**. Urgent requires a known sender or an existing reply thread, plus an outage or a deadline. A first contact does not jump the queue. Demo replies are sample wording from that pipeline. They are not labeled as Claude or GPT.
 4. It writes a draft. It does not send it.
 5. Nothing reaches the CRM until the filing gate says yes. A sender is authenticated only when `TRUSTED_AUTHSERV_ID` is set and the topmost Authentication-Results header from that exact id says `dkim=pass` aligned with From, or when a local DKIM check on the raw message finds an aligned signature. The variable is empty by default, and then every sender is a first contact. A subject of "Re:" is not a thread. A lead with none of the confirm features above is one click: **Accept and file in CRM**.
 6. A person edits the draft if they want and approves it. Spam is stored and not announced. Other mail gets a Slack-style alert.

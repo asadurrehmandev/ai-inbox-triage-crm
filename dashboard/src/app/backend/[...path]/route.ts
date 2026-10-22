@@ -17,6 +17,10 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
   const headers: Record<string, string> = {
     Authorization: `Bearer ${process.env.API_TOKEN ?? ""}`,
   };
+  const laneKey = request.headers.get("x-lane-key");
+  const laneProvider = request.headers.get("x-lane-provider");
+  if (laneKey) headers["X-Lane-Key"] = laneKey;
+  if (laneProvider) headers["X-Lane-Provider"] = laneProvider;
   const init: RequestInit = { method: request.method, headers, cache: "no-store" };
   if (request.method !== "GET" && request.method !== "HEAD") {
     headers["Content-Type"] = "application/json";

@@ -485,45 +485,45 @@ def draft_reply(
             "book a discovery call": "a short working session to see whether the workflow is a fit",
             "hire an automation freelancer": "a monthly automation engagement",
             "request a proposal": "a fixed-scope proposal",
-        }.get(intent, "the workflow you described")
+        }.get(intent, "what you described")
         return (
             f"{hello}\n\n"
-            f"Thanks for writing. I can help with {focus}. "
-            "I will send two times this week and a clear price before any build starts.\n\n"
-            "Asad Rehman\nLane"
+            f"Thanks for writing — I would like to help with {focus}. "
+            "I can send two times this week, and a price, before any build starts.\n\n"
+            "Asad"
         )
     if category == "invoice":
         return (
-            f"{hello}\n\nThis looks like billing. It is in the queue for a person "
-            "to check before any payment is sent or any item is marked closed.\n\n"
-            "Asad Rehman\nLane"
+            f"{hello}\n\n"
+            "This reads as billing, so I am leaving it with a person to check "
+            "before anything is paid or marked closed.\n\n"
+            "Asad"
         )
     if category == "review":
         hint = ""
         if suggested:
             why = ", ".join(reasons or [])
-            hint = f" Suggested label: {suggested}."
+            hint = f" The closest label is {suggested}."
             if why:
-                hint += f" Because: {why}."
+                hint += f" What stood out: {why}."
         return (
-            "Needs review. The rules were not confident enough to file this as a lead, "
-            "an invoice, or urgent."
+            "I read this and I am not ready to file it."
             + hint
-            + " Nothing was written to the CRM.\n\n"
-            "Asad Rehman\nLane"
+            + " Nothing goes to the CRM until someone accepts a label.\n\n"
+            "Asad"
         )
     if category == "urgent":
         return (
             f"{hello}\n\n"
-            "I have this and I am treating it as urgent. "
-            "You will get a status and the next concrete step within the hour.\n\n"
-            "Asad Rehman\nLane"
+            "I have this at the top of the queue. "
+            "You will get a status and the next step within the hour.\n\n"
+            "Asad"
         )
     return (
         f"{hello}\n\n"
-        "I have this logged. I will reply with the cause and the fix, "
+        "I have this logged. I will come back with the cause and the fix, "
         "or with the one detail I still need from you.\n\n"
-        "Asad Rehman\nLane"
+        "Asad"
     )
 
 
