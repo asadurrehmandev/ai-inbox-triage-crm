@@ -65,6 +65,10 @@ _HOURLY = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})\s*/\s*hr\b", re.IGNORE
 _YEN_MAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万円")
 _YEN_MARK = re.compile(r"(?:¥|￥)\s*(?P<num>\d[\d,]*)|(?P<num2>\d[\d,]*)\s*円")
 _YUAN = re.compile(r"(?P<num>\d[\d,]*)\s*元|(?:RMB|CNY)\s*(?P<num2>\d[\d,]*)")
+_WAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万\s*元")
+_DIRHAM = re.compile(
+    r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?:درهم|د\.إ)|(?:درهم|د\.إ)\s*(?P<num2>\d[\d,]*(?:\.\d+)?)"
+)
 _NAMED_CURRENCY = re.compile(
     rf"(?:(?P<code>TRY|TL|PKR|SEK|CHF|AUD|CAD|INR|PLN|NOK|DKK|SGD|NZD|AED)\s*(?P<num>{_NUM})"
     rf"|(?P<num2>{_NUM})\s*(?P<code2>TRY|TL|PKR|SEK|CHF|AUD|CAD|INR|PLN|NOK|DKK|SGD|NZD|AED|kr)\b"
@@ -202,6 +206,14 @@ def extract_budget(text: str) -> str | None:
     mxn = _MXN.search(text)
     if mxn:
         return _fmt("MXN", parse_number(mxn.group("num") or mxn.group("num2")))
+    wan = _WAN.search(text)
+    if wan:
+        amount = float(wan.group("num")) * 10_000
+        return f"CNY {int(round(amount)):,}" if abs(amount - round(amount)) < 0.001 else f"CNY {amount:,.2f}"
+    dirham = _DIRHAM.search(text)
+    if dirham:
+        amount = parse_number(dirham.group("num") or dirham.group("num2"))
+        return f"AED {int(round(amount)):,}" if abs(amount - round(amount)) < 0.001 else f"AED {amount:,.2f}"
     yen_mark = _YEN_MARK.search(text)
     if yen_mark:
         return _fmt("¥", parse_number(yen_mark.group("num") or yen_mark.group("num2")))

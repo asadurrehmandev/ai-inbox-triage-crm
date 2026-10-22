@@ -1,0 +1,21 @@
+{
+  "rows": 2671,
+  "train_rows": 2131,
+  "heldout_rows": 540,
+  "label_accuracy": 0.9351851851851852,
+  "label_correct": 505,
+  "label_total": 540,
+  "outage_recall": 1.0,
+  "outage_correct": 62,
+  "outage_total": 62,
+  "negation_recall": 1.0,
+  "negation_correct": 4,
+  "negation_total": 4,
+  "deadline_called_outage": 3,
+  "deadline_total": 7,
+  "money_threshold": 0.5,
+  "lure_recall": 1.0,
+  "lure_min": 0.7477551380840207,
+  "benign_false": 0.0,
+  "benign_max": 0.3479884067030249
+}

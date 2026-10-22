@@ -3,6 +3,8 @@
 The examples are structural. They are not lines from a sealed review set.
 """
 
+import pytest
+
 from app.classifier import classify_rules
 from app.risk import assess_risk
 
@@ -301,6 +303,111 @@ def test_intent_is_not_the_subject_line():
     )
     assert not result.intent.casefold().startswith("looking for a python partner")
     assert "python" in result.intent.casefold()
+
+
+def test_suspicious_outranks_every_label_and_is_never_urgent():
+    from app.rank import settle
+
+    labels = ["lead", "support", "invoice", "spam", "urgent", "review", "recruiter", "suspicious"]
+    extras = [[], ["urgent"], ["support"], ["lead", "urgent"], ["invoice", "urgent"]]
+    for label in labels:
+        for secondary in extras:
+            category, kept = settle(label, secondary, True)
+            assert category == "suspicious"
+            assert category != "urgent"
+            assert "urgent" not in kept
+    freemail = classify_rules(
+        {
+            "from_name": "Accounts Payable",
+            "from_email": "ap.vendor@gmail.com",
+            "subject": "OVERDUE invoice",
+            "body": "OVERDUE invoice 3044. Pay immediately via https://pay-vendor.co/3044 to avoid a fee.\n",
+        }
+    )
+    assert freemail.category == "suspicious"
+    assert "urgent" not in freemail.secondary_categories
+    bank = classify_rules(
+        {
+            "from_name": "Accounts",
+            "from_email": "billing@acme-hostlng.example",
+            "subject": "Zahlung",
+            "body": "Bitte die neue Bankverbindung für künftige Zahlungen verwenden. IBAN DE89370400440532013000.\n",
+        },
+        known_contacts=[{"name": "Accounts", "email": "billing@acme-hosting.example", "company": "Acme Hosting"}],
+    )
+    assert bank.category == "suspicious"
+    assert "urgent" not in bank.secondary_categories
+
+
+def test_a_paraphrased_outage_is_urgent_for_a_stranger_and_a_known_contact():
+    stranger = classify_rules(
+        {
+            "from_name": "Mina Cole",
+            "from_email": "mina@northmill.example",
+            "subject": "Checkout",
+            "body": "Every order hits a server error at checkout and sales are dropping. The whole shop is stuck.\n",
+        }
+    )
+    assert stranger.category == "urgent"
+    assert "unverified sender" in stranger.reasons
+    known = classify_rules(
+        {
+            "from_name": "Mina Cole",
+            "from_email": "mina@northmill.example",
+            "subject": "Notices",
+            "body": "None of the shipping emails left the queue. Buyers keep asking for tracking. Can you look now?\n",
+        },
+        known_contacts=[{"name": "Mina Cole", "email": "mina@northmill.example", "company": "Northmill"}],
+    )
+    assert known.category == "urgent"
+    assert known.company == "Northmill"
+
+
+def test_wan_and_dirham_budgets_and_a_short_intent():
+    from app.budget import extract_budget
+
+    assert extract_budget("预算 8 万元") == "CNY 80,000"
+    assert extract_budget("الميزانية 15,000 درهم") == "AED 15,000"
+    result = classify_rules(
+        {
+            "from_name": "Amélie Martin",
+            "from_email": "amelie@northmill.example",
+            "subject": "Bonjour",
+            "body": "Bonjour, nous cherchons un devis pour relier la boîte mail à notre CRM.\n\nAmélie Martin\nNorthmill Clinic\n",
+        }
+    )
+    assert len(result.intent) <= 140
+    assert result.intent != "Amélie"
+    assert "\n" not in result.intent
+    assert not result.intent.casefold().startswith("bonjour")
+
+
+def test_heldout_metrics_match_the_training_split():
+    import json
+    from pathlib import Path
+
+    report = json.loads((Path(__file__).resolve().parents[1] / "app" / "heldout_metrics.json").read_text(encoding="utf-8"))
+    assert report["label_total"] == report["heldout_rows"]
+    assert report["label_correct"] / report["label_total"] == pytest.approx(report["label_accuracy"])
+    assert report["outage_correct"] / report["outage_total"] == pytest.approx(report["outage_recall"])
+    assert report["label_accuracy"] >= 0.85
+    assert report["outage_recall"] >= 0.8
+    assert report["benign_false"] == 0
+    # Deadlines are not outages. The file records how many still crossed 0.5.
+    assert "deadline_called_outage" in report
+    assert report["deadline_called_outage"] <= report["deadline_total"]
+
+
+def test_a_filed_alert_is_a_lead_summary_not_the_draft():
+    from app.alerts import lead_summary
+
+    summary = lead_summary(
+        {"name": "Jane Cole", "company": "Acme Robotics", "budget": "$8,000", "intent": "Acme Robotics: Wants a quote"}
+    )
+    assert "Jane Cole" in summary
+    assert "Acme Robotics" in summary
+    assert "$8,000" in summary
+    assert "Asad" not in summary
 
 
 def test_approving_suspicious_mail_does_not_announce_a_reply(client):

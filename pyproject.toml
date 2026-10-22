@@ -16,6 +16,9 @@ dependencies = [
   "apscheduler>=3.10",
   "python-dotenv>=1.0",
   "dkimpy>=1.1.8",
+  "numpy>=1.26",
+  "onnxruntime>=1.19",
+  "tokenizers>=0.20",
 ]
 
 [project.optional-dependencies]

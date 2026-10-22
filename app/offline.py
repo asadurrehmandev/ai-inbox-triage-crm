@@ -1,9 +1,7 @@
-"""Small offline classifier. No network, no paid key, a few hundred kilobytes.
+"""Retired hashed n-gram classifier.
 
-A hashed character model is trained on app.synthetic_train, which is not an
-evaluation set. A short multilingual lexicon breaks ties when the rules have
-nothing to say. The weights live in memory for the process and are never written
-back to disk.
+Labels and urgency now come from app.heads (a multilingual embedding plus a
+trained head). This module is not on the classify path.
 """
 
 from __future__ import annotations

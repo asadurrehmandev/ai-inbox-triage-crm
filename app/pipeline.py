@@ -212,11 +212,12 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
         existing = {item.get("email_id") for item in db.list_leads()}
         if email["id"] not in existing:
             lead = push_lead(email, result)
+            record = record_from_email(email, result)
             alerts.post_alert(
                 "lead",
-                record_from_email(email, result),
+                record,
                 title="Filed to CRM",
-                body=result.draft_reply,
+                body=alerts.lead_summary(record),
             )
         else:
             lead = next(item for item in db.list_leads() if item.get("email_id") == email["id"])

@@ -258,8 +258,8 @@ export function ApprovalCard({
           <StatusBadge tone={categoryTone(item.category)}>{categoryLabel(item.category)}</StatusBadge>
           <Tooltip>
             <TooltipTrigger asChild>
-              <button type="button" className="inline-flex items-center justify-center rounded-sm max-md:min-h-11 max-md:min-w-11">
-                <StatusBadge tone={confidence.tone} className="max-md:h-11 max-md:min-w-11 max-md:px-3">
+              <button type="button" className="inline-flex h-11 min-w-11 items-center justify-center rounded-sm md:h-5 md:min-w-0">
+                <StatusBadge tone={confidence.tone} className="!h-11 !min-h-11 !min-w-11 !px-3 md:!h-5 md:!min-h-0 md:!min-w-0 md:!px-1.5">
                   {confidence.label}
                 </StatusBadge>
               </button>

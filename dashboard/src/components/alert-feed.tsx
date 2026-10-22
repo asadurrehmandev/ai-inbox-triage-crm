@@ -50,8 +50,8 @@ export function AlertFeed() {
             title="No alerts yet"
             body="Run the worker to post the first one."
             action={
-              <Button type="button" variant="outline" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
-                Run worker now
+              <Button type="button" variant="outline" className="h-8 min-h-8 whitespace-nowrap px-2 text-xs max-md:!h-8 max-md:!min-h-8" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
+                Run worker
               </Button>
             }
           />

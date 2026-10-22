@@ -34,6 +34,7 @@ _BRANDS: dict[str, tuple[str, ...]] = {
     "intuit": ("intuit.com",),
     "quickbooks": ("quickbooks.com", "intuit.com"),
     "zoom": ("zoom.us", "zoom.com"),
+    "coinbase": ("coinbase.com",),
 }
 
 _FREE_MAIL = {
@@ -47,6 +48,17 @@ _FREE_MAIL = {
     "aol.com",
     "proton.me",
     "protonmail.com",
+    "pm.me",
+    "gmx.com",
+    "gmx.de",
+    "yandex.com",
+    "yandex.ru",
+    "qq.com",
+    "163.com",
+    "mail.ru",
+    "tuta.com",
+    "tutanota.com",
+    "zoho.com",
 }
 
 _LEET = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t"})

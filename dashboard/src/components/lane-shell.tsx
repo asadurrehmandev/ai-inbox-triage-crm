@@ -92,6 +92,7 @@ export function LaneShell({ children }: { children: ReactNode }) {
               <Button
                 type="button"
                 variant="outline"
+                className="h-8 min-h-8 whitespace-nowrap px-2 text-xs max-md:!h-8 max-md:!min-h-8 max-md:px-2 md:px-2.5 md:text-sm"
                 onClick={() => void desk.runIntake()}
                 disabled={desk.busy || desk.pending.length === 0}
               >

@@ -31,7 +31,7 @@ import { cadence, categoryLabel, formatListTime, type Triage } from "@/lib/types
 import { cn } from "@/lib/utils";
 
 const MAIN_FILTERS = [
-  { id: "approval", label: "Needs approval" },
+  { id: "approval", label: "Approval" },
   { id: "lead", label: "Leads" },
   { id: "urgent", label: "Urgent" },
   { id: "review", label: "Review" },
@@ -311,8 +311,8 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
                   : "Run the worker when new mail arrives."
               }
               action={
-                <Button type="button" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
-                  Run worker now
+                <Button type="button" variant="outline" className="h-8 min-h-8 whitespace-nowrap px-2 text-xs max-md:!h-8 max-md:!min-h-8" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
+                  Run worker
                 </Button>
               }
             />
@@ -341,8 +341,8 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
                   : "Nothing in this filter."
             }
             action={
-              <Button type="button" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
-                Run worker now
+              <Button type="button" variant="outline" className="h-8 min-h-8 whitespace-nowrap px-2 text-xs max-md:!h-8 max-md:!min-h-8" onClick={() => void desk.runIntake()} disabled={desk.busy || desk.pending.length === 0}>
+                Run worker
               </Button>
             }
           />

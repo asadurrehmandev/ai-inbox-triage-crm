@@ -34,6 +34,8 @@ pytest
 uvicorn app.main:app --host 127.0.0.1 --port 8741
 ```
 
+The first classification downloads `intfloat/multilingual-e5-small` as a quantized ONNX file, about 130 MB with the tokenizer, into `~/.cache/lane/e5`. Set `LANE_MODEL_DIR` to put that cache somewhere else. It runs on CPU. Nothing in that file is sent to a paid model.
+
 In another terminal: `cd dashboard && npm install && npm run dev`, then open http://127.0.0.1:8742. The browser talks only to the Next server. That server holds `API_TOKEN` and attaches it on the way to the API. Login sets an httpOnly cookie. Eight wrong passwords from one address pause login for ten minutes.
 
 | Surface | URL |
@@ -62,15 +64,16 @@ The inbox is a list and a reading pane. J and K move the selection. E or ⌘↵ 
 
 | Set | Result |
 | --- | --- |
-| Dev mailbox, exact category (`data/sample_emails.json`, 44) | **40/44** |
-| Same mailbox, counting suspicious as a hit when the gold label is spam | **44/44**. The four gaps are spam filed as suspicious. |
-| Name, company, and budget | **132/132**. Intent is one line taken from the body. It does not copy the subject in front of that line, and it is not in this count. |
-| `data/eval_fresh.json` (36, hash `6598554eb9358b571f08d994bd50a7e4be414182d697170927063f35ce6cf857`) | **30/36**. Structural phishing **7/7** suspicious. The hash stops later edits. It does not make the file unseen. |
-| `data/eval_unseen.json` (68) | **66/68** (97.1%). The scorer counts suspicious as a hit when the gold label is spam. The file was written in the same pass as an earlier ruleset. Do not cite an older 68/68 figure. |
-| `tests/new_emails_v2.py` (53) | Classification **41/53**. Urgent **1/6**. Phishing, fraud, and injection **9/9** suspicious. Legitimate mail flagged suspicious **0/39**. Budget, where a value exists, **24/24**. Filled name, company, and budget slots **93/95**. Non-leads written to the CRM: **0**. |
+| Dev mailbox, exact category (`data/sample_emails.json`, 44) | **39/44** |
+| Same mailbox, counting spam filed as suspicious, and a first-contact urgent row left in review with suggested urgent | **44/44** |
+| Name, company, and budget | **132/132**. Intent is a templated line from those fields, at most 140 characters. It is not a body dump and it is not in this count. |
+| `data/eval_fresh.json` (36, hash `6598554eb9358b571f08d994bd50a7e4be414182d697170927063f35ce6cf857`) | **32/36**. Structural phishing **7/7** suspicious. The hash stops later edits. It does not make the file unseen. |
+| `data/eval_unseen.json` (68) | **66/68** (97.1%). Fields with a value **127/127**. Empty slots filled in **0/77**. The scorer counts suspicious as a hit when the gold label is spam. The file was written in the same pass as an earlier ruleset. Do not cite an older 68/68 figure. |
+| `tests/new_emails_v2.py` (53) | Classification **45/53**. Urgent **1/6**. Phishing, fraud, and injection **9/9** suspicious. Legitimate mail flagged suspicious **0/39**. Budget, where a value exists, **24/24**. Filled name, company, and budget slots **95/95**. Non-leads written to the CRM: **0**. |
 | `tests/new_emails_v3.py` (45) | Classification **43/45**, where review is an accepted label for a low-confidence legitimate message. Urgent **1/3**. Phishing, fraud, and injection **16/16** suspicious, none written to the CRM. Legitimate mail flagged suspicious **0/27**. Budget **18/19**. Filled slots **65/67**. |
+| Synthetic held-out split (`app/heldout_metrics.json`, `zlib.crc32(text) % 5 == 0`) | **540** rows held out of **2,671**. Label accuracy **505/540** (93.5%). Outage recall **62/62**. Negation recall **4/4**. Money-lure recall **1.0** with **0** benign false positives at the 0.5 cutoff. At that same 0.5 cutoff, **3/7** deadline rows are called outages. The desk promotes an outage only at **0.66**, so those deadlines are not auto-urgent. This split is synthetic. It is not a QA set. |
 
-The four exact misses on the dev mailbox are spam messages filed as suspicious. On v2 and v3 the urgent misses are first-contact notes that name a deadline or a priority and do not describe a service failure, so they stay in review. A first-contact outage (offline, down, caído, cannot take bookings, and the same shape in the other languages in the lexicon) is labeled urgent and marked unverified sender. An overdue invoice stays an invoice and also appears under Urgent. A suspicious message outranks both of those labels and does not appear under Urgent. Demo mode still does not write a lead until a person approves it.
+The five exact misses on the dev mailbox are two spam notes filed as suspicious and three urgent notes left in review with suggested urgent. On v2 the urgent misses are n17, n18, n19, n21, and n22. On v3 they are v12 and v13. Those notes name a deadline or a priority and do not describe a service failure, so they stay in review. A known contact's outage is urgent as well. An overdue invoice stays an invoice and also appears under Urgent. A suspicious message outranks both of those labels and does not appear under Urgent. Demo mode still does not write a lead until a person approves it. v3 still misses a budget written as Spanish number-words (v07) and can use a CJK personal name as the company (v05). A short follow-up with no ask can be labeled support (fresh f24). Spam and suspicious rows can still show a From display name the gold file left empty. Those rows are not filed.
 
 To score Claude on a set this repo was not tuned on:
 
@@ -90,7 +93,7 @@ That reads `data/sample_emails.json`, calls Claude, and writes only the recordin
 
 ## Limitations
 
-Demo mode flags a payment lure. That includes an invoice, withdrawal, or payout from an unknown domain, a generic invoice host, or a one-edit lookalike of a known brand, when the note asks to verify, release funds, or pay via a link. A lookalike of a known contact's domain when the note asks to move money, and an instruction addressed to the assistant, are flagged the same way. Suspicious outranks invoice and urgent, and that mail is not listed under Urgent. It is not filed. A real outage from a first-time sender is urgent, and the reason says unverified sender. The v2 urgent score is 1/6 and the v3 urgent score is 1/3, because the other rows are deadlines rather than outages. An invoice that is past due stays an invoice and is also listed under Urgent. A recruiter is not a lead, and a salary is not a budget. Lane does not read images. A `cid:` part, and an image hosted on the sender's domain, do not by themselves require a confirm.
+Demo mode scores phishing from features, not from a list of lure sentences. The features are: whether the sender domain is a known contact; a free-mail domain (Gmail, Outlook, Proton and the rest) whose display name or signature claims a company; a sender or link domain that is a lookalike of a known contact or brand (edit distance up to 2, homoglyphs, subdomain tricks); a link domain that differs from the sender; a URL shortener; a money-movement ask (pay, transfer, bank or wallet change, gift cards, crypto, or verifying an account or a withdrawal); and urgency pressure. A weighted score combines them. Money-movement plus an unknown, free-mail, or lookalike sender, or a link that does not match the sender, is suspicious. Suspicious outranks every other label, in one place, and that mail is never listed under Urgent. It is not filed. A vendor invoice on the sender's own domain, including a footer that only prints a sort code, stays an invoice. A real outage is urgent for a first-time sender and for a known contact, and a first-time sender is marked unverified. The v2 urgent score is 1/6 and the v3 urgent score is 1/3, because the other rows are deadlines rather than outages. An invoice that is past due stays an invoice and is also listed under Urgent. A recruiter is not a lead, and a salary is not a budget. Amounts in 万元 and in AED (درهم) are read as budgets. The company comes from the signature, the domain, or an org line, not from the greeting. The CRM name comes from the From display name or the signature. Intent is filled from those fields and is at most 140 characters. Lane does not read images. A `cid:` part, and an image hosted on the sender's domain, do not by themselves require a confirm.
 
 Authentication is trusted only from the receiving mail server. `TRUSTED_AUTHSERV_ID` is that server's authserv-id, matched exactly: a suffix, a lookalike, a comment, or a zero-width character in the id does not count. The receiving server prepends its `Authentication-Results`. Lane reads Authentication-Results before `ARC-Authentication-Results`, whatever order the JSON keys arrived in, and uses only the topmost header whose id is in the list. `Authentication-Results-Original` is ignored. With the variable empty, which is the default, every sender is unauthenticated, including a header stored by a signed webhook. Once the variable is set, that webhook is trusted to forward the receiving server's headers faithfully and topmost-first. Microsoft 365 results often have no usable authserv-id, so those headers do not authenticate anyone. On the IMAP path the raw message is checked with DKIM: every signature is verified, and one aligned pass is enough. A message that was checked and did not pass is not authenticated by a header.
 
@@ -110,10 +113,10 @@ These are phone-blocked. Confirm does not file them:
 
 These still get through as ordinary mail unless they also trip a rule above:
 
-- A cousin domain that is more than one edit from every known contact, and is not a known brand with a swapped character (`northwind-logistics.co` next to a real `northwindlogistics.com`). One edit on a long registrable label, plus a request to wire money or verify a bank account, is suspicious.
+- A cousin domain more than two edits from every known contact and every known brand, with no homoglyph and no subdomain trick. Two edits, a homoglyph, or a brand tucked under another registrable domain, plus a request to move money, is suspicious.
 - A reply that quotes a real thread and then asks for ordinary work, with no new link and no stored Message-ID to check.
 - Calendar invites are not parsed. The confirm reason is the text "calendar invite", not the event.
-- An outage written in a language the short lexicon does not cover. Spanish, French, German, Portuguese, Turkish, Chinese, Japanese, and Dutch outage and support wording in the training set is covered. The training rows are not copies of the eval files.
+- An outage the embedding head has not seen, and any deadline that is not a service failure. The head is trained on synthetic mail in English, Spanish, French, German, Portuguese, Turkish, Chinese, Japanese, Arabic, Dutch, Swedish, and Polish. Those rows are not copies of the eval files or of a QA report. Held-out outage recall on that synthetic split is 62/62. The v2 and v3 urgent misses above are deadlines, and they stay in review.
 - Instructions a person can read in the normal text. Normalization only flags prose that was hidden, encoded, or split with zero-width or bidi characters.
 - A picture that does not say QR. Lane cannot see a code drawn in an image. If the text, the file name, the `src`, and the `alt` never contain `qr`, the image is one click. A logo is left alone on purpose.
 - A payout, disbursement, or preference line that never names a rail, a payee, an account, a wallet, or a change of where invoices or payments go. "Our payout preference is the Friday batch" is ordinary mail. A paystub or a "funds available" notice is the same shape, so a fooled model can auto-file one. The rules demo never auto-files.
@@ -121,13 +124,13 @@ These still get through as ordinary mail unless they also trip a rule above:
 - A note that an old account will bounce, that payment should wait until a pay-to is updated, or that the numbers are on another page, when it names no bank, rail, form, lockbox, or real account number.
 - A sort code written as digits with no hyphens.
 
-Chasing each of those with another phrase list is the arms race this desk stops playing. Claude is the classifier. A person accepts the lead. Payment mail is verified by phone.
+The phishing decision is that feature score, not a longer list of sentences. Claude is the live classifier. A person accepts the lead. Payment mail is verified by phone.
 
 ## How the pipeline works
 
 1. Mail arrives on `POST /api/webhooks/email`, or the worker polls IMAP for anything unseen. The demo uses a labeled sample feed instead of a live mailbox.
 2. The message is normalized before any rule runs: zero-width and bidi characters are stripped, off-screen and hidden HTML is dropped, and base64, quoted-printable, and HTML-entity runs are decoded. Concealed prose is flagged.
-3. Demo mode, or live Claude / OpenAI when a key is present, suggests **lead, support, invoice, spam, urgent, suspicious, recruiter, or needs review**, and extracts **name, company, budget, and intent**. Intent is one line from the body, not the subject pasted again. Invoice is used when the message has an amount due, an invoice number, a receipt, or a payment request. A contract or a statement of work with a budget stays a lead. When the keyword rules are unsure, a small offline classifier (hashed character n-grams and a multilingual lexicon, trained on a separate synthetic set) picks the label. It does not call a paid model and it does not load a large embedding file. A known sender or an existing thread plus operational pressure is urgent. A first-contact outage is urgent and marked unverified sender. A past-due invoice stays an invoice and is also urgent, unless the message is suspicious. A newsletter with an unsubscribe line is spam, not a review item. A support note that says it is not urgent stays support. Demo replies are sample wording from that pipeline. They are not labeled as Claude or GPT.
+3. Demo mode, or live Claude / OpenAI when a key is present, suggests **lead, support, invoice, spam, urgent, suspicious, recruiter, or needs review**, and extracts **name, company, budget, and intent**. Intent is a short line built from who, what they want, the budget, and the timeline. It is not the subject and it is not the body. Invoice is used when the message has an amount due, an invoice number, a receipt, or a payment request. A contract or a statement of work with a budget stays a lead. Clear keyword hits stay as they are. When they are unsure, a head on `intfloat/multilingual-e5-small` picks the label, and a separate head picks urgency (an outage or customer impact, an explicit rush, or a "not urgent" / "no rush" negation). The heads are trained on thousands of synthetic emails. They are not trained on the eval files or on a QA report. The rank rule lives in one function: suspicious replaces every other label and is removed from Urgent. A known sender, an existing thread, or an outage is what makes a message urgent. A past-due invoice stays an invoice and is also urgent, unless the message is suspicious. A newsletter with an unsubscribe line is spam, not a review item. A support note that says it is not urgent stays support. **Filed to CRM** quotes the lead summary, not the draft. Demo replies are sample wording from that pipeline. They are not labeled as Claude or GPT.
 4. It writes a draft. It does not send it.
 5. Nothing reaches the CRM until the filing gate says yes. A sender is authenticated only when `TRUSTED_AUTHSERV_ID` is set and the topmost Authentication-Results header from that exact id says `dkim=pass` aligned with From, or when a local DKIM check on the raw message finds an aligned signature. The variable is empty by default, and then every sender is a first contact. A subject of "Re:" is not a thread. Approving a lead is the write: **Approve and file to CRM**. The gate still runs on that click.
 6. A person edits the draft if they want and approves it. Spam is stored and not announced. Approving a suspicious message archives it and does not post a "Reply approved" alert. Alerts are raised for urgent mail, suspicious mail, a lead that was just filed, and a reply that was just approved on anything else. Ordinary support and invoices do not each create an alert. The stored alert text is plain. Slack's mrkdwn escaping happens only on the webhook payload.
@@ -215,10 +218,15 @@ Webhook body:
 | --- | --- |
 | `app/main.py` | FastAPI ingest, classification, approval |
 | `app/worker.py` | APScheduler loop |
-| `app/classifier.py` | Rule engine used when no model key is set |
-| `app/offline.py` | Offline classifier used when the rules are unsure. Trained in memory from `app/synthetic_train.py` |
+| `app/classifier.py` | Rule engine used when no model key is set, plus the embedding heads |
+| `app/embedder.py` | `multilingual-e5-small` on CPU (quantized ONNX, about 130 MB) |
+| `app/heads.py` | Trained label, urgency, and money heads (`app/model_weights.json`) |
+| `app/risk_score.py` | Feature phishing score. Money-movement plus a risky sender or a link mismatch is suspicious |
+| `app/rank.py` | The one place suspicious outranks every label and is never urgent |
+| `app/offline.py` | Retired hashed n-gram. Not on the classify path |
 | `app/llm.py` | Claude (`claude-sonnet-5-5`), then OpenAI, with a logged rules fallback |
-| `app/risk.py` | Phishing, fraud, and injection checks |
+| `app/risk.py` | Structural phishing, fraud, and injection checks |
+| `scripts/train_heads.py` | Retrains the heads from `app/corpus.py` and writes `app/heldout_metrics.json` |
 | `app/gate.py` | The server filing gate |
 | `app/crm.py` | Mock, HubSpot, and GoHighLevel upserts |
 | `data/sample_emails.json` | 44 dev messages |
@@ -233,6 +241,6 @@ Webhook body:
 
 **Title:** AI Inbox Triage to CRM (Python + Claude)
 
-**Description:** I build a Python service that reads a client's inbox and classifies each message with Claude, pulling out the name, company, budget, and intent. A person approves the draft, and approving a lead writes it to HubSpot or GoHighLevel through a filing gate. With no key, a ruleset plus a small offline classifier does the same job and does not file on its own. Claude is the product.
+**Description:** I build a Python service that reads a client's inbox and classifies each message with Claude, pulling out the name, company, budget, and intent. A person approves the draft, and approving a lead writes it to HubSpot or GoHighLevel through a filing gate. With no key, a ruleset plus a local multilingual embedding model does the same job and does not file on its own. Claude is the product.
 
 **Tags:** Python, Claude, AI Automation, HubSpot, FastAPI
