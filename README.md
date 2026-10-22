@@ -17,12 +17,13 @@ The expensive failure is not the reading. It is the lead that sits until Thursda
 Lane is a human-in-the-loop desk with a small Python worker behind it.
 
 1. Mail arrives on `POST /api/webhooks/email`, or the worker polls IMAP for anything unseen. The demo uses a labeled sample feed instead of a live mailbox.
-2. The worker asks Claude (or the rule engine) to classify the message as **lead, support, invoice, spam, or urgent**, and to extract **name, company, budget, and intent**.
-3. It writes a draft in Asad's voice. It does not send it.
-4. If the message is a lead, the CRM adapter creates the contact and the worker posts a Slack-style alert. Support, invoices, and urgent mail are alerted and queued. Spam is stored and not announced.
-5. A person opens the dashboard, edits the draft if they want, and approves it.
+2. A security check runs first. Phishing, a bank-change request, or a prompt injection is marked **suspicious**, skipped by the model, and not written to the CRM.
+3. The worker asks Claude (or the rule engine) to classify the message as **lead, support, invoice, spam, urgent, or suspicious**, and to extract **name, company, budget, and intent**.
+4. It writes a draft in Asad's voice. It does not send it. A suspicious message gets a "do not reply" note instead.
+5. If the message is a lead, the CRM adapter upserts the contact and the worker posts a Slack-style alert. Support, invoices, urgent, and suspicious mail are alerted and queued. Spam is stored and not announced.
+6. A person opens the dashboard, edits the draft if they want, and approves it.
 
-Hours returned are counted at six minutes a message: read, label, CRM entry, first reply. The dashboard shows that total for the mailbox in front of you, and the same rate projected onto an 80-message day.
+Hours returned are counted at six minutes a message: read, label, CRM entry, first reply. Spam and suspicious mail are left out of that count. The dashboard shows the total for the mailbox in front of you. The "8.0 hours" figure is the same rate on an assumed 80-message day. It is an assumption, not a measurement.
 
 ## Architecture
 
@@ -74,14 +75,18 @@ flowchart LR
 
 ![Run the worker, then approve the reply](artifacts/worker_approval.gif)
 
-- **No paid keys required.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. Classification, extraction, and drafts use the rule engine. Add an Anthropic key and the next pass calls Claude. An OpenAI key is the fallback model. If a live call fails, the rules still return a decision.
-- **Webhook ingest.** `POST /api/webhooks/email` queues one message. The worker picks it up on the next pass, or immediately if you call `POST /api/worker/run`.
+- **No paid keys required.** Leave `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` empty. Classification, extraction, and drafts use the rule engine, and the sidebar says so. Add an Anthropic key and the next pass calls Claude (`claude-sonnet-5-5`, the active Sonnet as of 2026-10-22). An OpenAI key is the second provider. If a live call fails, the rules still return a decision, the row is stored as `rules-fallback` with the error type, and `/api/health` counts those fallbacks.
+- **Webhook ingest.** `POST /api/webhooks/email` queues one message. The body must carry `X-Lane-Signature: sha256=<hmac of the raw body>` using `WEBHOOK_SECRET`. The same `message_id` (or the same sender, subject, time, and body) returns `duplicate` instead of queueing a second copy. The worker picks it up on the next pass, or immediately if you call `POST /api/worker/run`.
 - **Scheduler.** APScheduler polls on `WORKER_INTERVAL_SECONDS` (60 by default). The Worker page shows the next run and the log of passes.
 - **Mock mailbox.** Forty-four labeled messages stand in for IMAP. Eight stay unseen so Run worker has something to do.
-- **CRM adapter.** Every lead is written to the mock CRM the dashboard reads. Set `HUBSPOT_TOKEN` and the same contact is created in HubSpot. Set `GHL_API_KEY` and `GHL_LOCATION_ID` for GoHighLevel.
+- **CRM adapter.** Every lead is written to the mock CRM the dashboard reads. Set `HUBSPOT_TOKEN` and the same contact is upserted in HubSpot by email, including `lane_budget` and `lane_intent`. Set `GHL_API_KEY` and `GHL_LOCATION_ID` and GoHighLevel upserts the contact. A remote failure is stored on the lead and shown in the CRM table.
 - **Mock Slack.** Alerts render in the dashboard. `SLACK_WEBHOOK_URL` also posts them.
 - **Approve or edit.** The draft is a real textarea. Approve marks the lead "Reply approved" and posts a second alert. Nothing is emailed until you connect a sender.
-- **Measured accuracy.** `pytest` scores the rule engine on the labeled set and prints classification and field accuracy.
+- **Measured accuracy.** The numbers below are from the rule engine, which is what runs when no key is set. They are not a Claude score. `pytest` prints both sets.
+
+  The dev mailbox (`data/sample_emails.json`, 44 messages) was used while the rules were written. Exact category match is **43/44**. The miss is `m35`, a McAfee lookalike labeled spam and filed as **suspicious**, which is the review state we want. Counting that as a correct spam decision is **44/44**. Name, company, and budget match **44/44**. Intent matches **43/44** (`m35` is "review a suspicious message" rather than "unsolicited promotion").
+
+  The held-out file (`data/eval_unseen.json`, 68 messages: 36 from an outside review plus 32 more frozen in the same pass) was not used as a word list. Classification is **68/68**, where a suspicious decision counts as a hit on a spam label. On slots that have a name, company, or budget, the value matches **127/127**. On slots that are empty, the engine invented a value **0/77** times. Intent is not in that headline. A range such as `£15,000–£20,000` counts as correct when the labeled amount sits inside it.
 
 ## Run it
 
@@ -90,9 +95,12 @@ Python 3.11+ and Node 20.9+. Docker is optional.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -r requirements.lock
+pip install --no-deps -e ".[dev]"
+cp .env.example .env
+cp dashboard/.env.example dashboard/.env.local
 pytest
-uvicorn app.main:app --host 0.0.0.0 --port 8741
+uvicorn app.main:app --host 127.0.0.1 --port 8741
 ```
 
 In another terminal:
@@ -103,9 +111,9 @@ npm install
 npm run dev
 ```
 
-Open [the desk](http://127.0.0.1:8742). The API is on port 8741. Copy `.env.example` to `.env` when you want to drop in a Claude key or a CRM token.
+Open [the desk](http://127.0.0.1:8742). The API listens on `127.0.0.1:8741`. Mutations and the desk reads send `Authorization: Bearer $API_TOKEN`. The sample token in `.env.example` is for a local demo. Change it before you expose the port.
 
-For a screenshot session, set `WORKER_INTERVAL_SECONDS=300` so the sample queue stays put until you press Run worker.
+For a screenshot session, set `WORKER_INTERVAL_SECONDS=1800` so the sample queue stays put until you press Run worker.
 
 ### Docker
 
@@ -125,9 +133,9 @@ docker compose up --build
 
 **Outlook.** Power Automate (or a small Graph subscription) posts the same JSON to the webhook when mail hits a shared mailbox. Many Microsoft 365 tenants block basic IMAP, so the webhook is the path to prefer. IMAP (`outlook.office365.com`) still works for tenants that allow it, via `IMAP_HOST`, `IMAP_USER`, and `IMAP_PASSWORD`.
 
-**HubSpot.** Set `HUBSPOT_TOKEN` to a private app token with `crm.objects.contacts.write`. The HubSpot adapter creates the contact with email, first name, last name, company, and lifecycle stage `lead`. The mock row stays, so the desk and the CRM do not drift during a rollout.
+**HubSpot.** Set `HUBSPOT_TOKEN` to a private app token with `crm.objects.contacts.write`. The adapter upserts the contact by email and writes `lane_budget` and `lane_intent` alongside the standard name and company fields. The mock row stays, so the desk and the CRM do not drift during a rollout.
 
-**GoHighLevel.** Set `GHL_API_KEY` and `GHL_LOCATION_ID`. The adapter posts the contact to LeadConnector with the source `Lane inbox triage`.
+**GoHighLevel.** Set `GHL_API_KEY` and `GHL_LOCATION_ID`. The adapter upserts the contact at LeadConnector with the source `Lane inbox triage`.
 
 **Slack.** Set `SLACK_WEBHOOK_URL`. The alert text is the same string the dashboard already shows.
 
@@ -152,10 +160,12 @@ Webhook body:
 | `app/main.py` | FastAPI ingest, classification, approval |
 | `app/worker.py` | APScheduler loop |
 | `app/classifier.py` | Rule engine used when no model key is set |
-| `app/llm.py` | Claude, then OpenAI, with a rule fallback |
-| `app/crm.py` | Mock, HubSpot, and GoHighLevel adapters |
-| `data/sample_emails.json` | 44 labeled messages |
-| `tests/` | Accuracy, webhook, and CRM tests |
+| `app/llm.py` | Claude (`claude-sonnet-5-5`), then OpenAI, with a logged rules fallback |
+| `app/risk.py` | Phishing, fraud, and injection checks |
+| `app/crm.py` | Mock, HubSpot, and GoHighLevel upserts |
+| `data/sample_emails.json` | 44 dev messages |
+| `data/eval_unseen.json` | 68 frozen held-out messages |
+| `tests/` | Accuracy, security, webhook, and CRM tests |
 | `dashboard/` | Next.js approval desk |
 | `docker-compose.yml` | API and dashboard |
 

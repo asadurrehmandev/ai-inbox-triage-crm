@@ -37,6 +37,7 @@ export function CrmBoard() {
                   <th className="px-4 py-3 font-medium">Budget</th>
                   <th className="px-4 py-3 font-medium">Intent</th>
                   <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">CRM sync</th>
                   <th className="px-4 py-3 font-medium">Added</th>
                 </tr>
               </thead>
@@ -51,6 +52,16 @@ export function CrmBoard() {
                     <td className="px-4 py-3">{lead.budget || "Not stated"}</td>
                     <td className="px-4 py-3">{lead.intent}</td>
                     <td className="px-4 py-3">{lead.status}</td>
+                    <td className="px-4 py-3">
+                      <div>
+                        {lead.remote_status === "ok" || lead.remote_status === "error"
+                          ? lead.remote_status
+                          : lead.destination}
+                      </div>
+                      {lead.remote_error ? (
+                        <div className="text-xs text-muted-foreground">{lead.remote_error}</div>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3 text-muted-foreground">{formatWhen(lead.created_at)}</td>
                   </tr>
                 ))}

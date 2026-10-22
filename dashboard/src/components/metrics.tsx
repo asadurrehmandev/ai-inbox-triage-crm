@@ -21,7 +21,7 @@ export function Metrics({ stats }: { stats: Stats }) {
           <p className="mt-2 font-serif text-5xl leading-none tracking-tight">
             {stats.projected_daily_hours.toFixed(1)}
           </p>
-          <p className="mt-2 text-sm text-muted-foreground">hours a team gets back</p>
+          <p className="mt-2 text-sm text-muted-foreground">hours, as an assumption</p>
         </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
           <Stat label="Processed" value={stats.processed} />
@@ -48,8 +48,8 @@ export function Metrics({ stats }: { stats: Stats }) {
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
         {stats.minutes_per_email} minutes each for reading, labeling, the CRM entry, and a first reply.
-        The {stats.projected_daily_hours.toFixed(1)} hour figure is that same rate on an{" "}
-        {stats.projected_daily_volume}-message day.
+        Spam and suspicious mail are not counted. The {stats.projected_daily_hours.toFixed(1)} hour
+        figure assumes {stats.projected_daily_volume} messages a day. It is not a measurement.
       </p>
     </section>
   );

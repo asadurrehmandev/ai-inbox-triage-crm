@@ -31,10 +31,10 @@ def push_lead(email: dict, result: Classification) -> dict:
             "email_id": email["id"],
             "name": result.name,
             "company": result.company,
-            "email": email.get("from_email"),
+            "email": result.contact_email or email.get("from_email"),
             "budget": result.budget,
             "intent": result.intent,
-            "category": result.category,
+            "category": "lead",
             "source_subject": email.get("subject"),
             "status": "Reply pending",
         }
@@ -42,18 +42,25 @@ def push_lead(email: dict, result: Classification) -> dict:
 
 
 def notify(email: dict, result: Classification) -> dict:
+    if result.category == "suspicious":
+        return alerts.post_alert(
+            "suspicious",
+            record_from_email(email, result),
+            title="Possible phishing — do not pay or reply",
+            body=result.draft_reply,
+        )
     return alerts.post_alert(result.category, record_from_email(email, result))
 
 
 def apply_policy(email: dict, result: Classification) -> dict:
-    """Leads go to the CRM. Spam stays quiet. Everything else is saved and alerted."""
+    """Leads go to the CRM. Spam stays quiet. Suspicious mail is alerted and not filed."""
     triage = save_classification(email, result)
+    categories = {result.category, *result.secondary_categories}
     lead = None
     alert = None
-    if result.category == "lead":
+    if "lead" in categories and result.category not in {"spam", "suspicious"}:
         lead = push_lead(email, result)
-        alert = notify(email, result)
-    elif result.category != "spam":
+    if result.category != "spam":
         alert = notify(email, result)
     db.set_status(email["id"], "triaged")
     return {"triage": db.public_triage({**triage, **_email_fields(email)}), "lead": lead, "alert": alert}
@@ -70,7 +77,12 @@ def _email_fields(email: dict) -> dict:
 
 
 def process_email(email: dict) -> dict:
-    result = classify_email(email)
+    contacts = [
+        {"name": row.get("name"), "email": row.get("email")}
+        for row in db.list_leads()
+        if row.get("name") and row.get("email")
+    ]
+    result = classify_email(email, contacts)
     return apply_policy(email, result)
 
 

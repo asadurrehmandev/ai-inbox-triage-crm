@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import codecs
 import email
+import email.utils
 import imaplib
+import logging
 import os
+import re
+from datetime import timezone
 from email.header import decode_header
 
-from app import db
+from app.prepare import html_to_text
 
-
-def _decode(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value
+logger = logging.getLogger("lane.mailbox")
+FETCH_CAP = 200
 
 
 def _header(raw: str | None) -> str:
@@ -24,10 +24,125 @@ def _header(raw: str | None) -> str:
     parts = []
     for text, encoding in decode_header(raw):
         if isinstance(text, bytes):
-            parts.append(text.decode(encoding or "utf-8", errors="replace"))
+            parts.append(decode_bytes(text, encoding))
         else:
             parts.append(text)
     return "".join(parts)
+
+
+def decode_bytes(raw: bytes, charset: str | None) -> str:
+    name = (charset or "utf-8").strip() or "utf-8"
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        logger.warning("imap_unknown_charset %s", name)
+        name = "utf-8"
+    return raw.decode(name, errors="replace")
+
+
+def normalize_date(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return ""
+    if parsed is None:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def message_body(parsed: email.message.Message) -> str:
+    plain = ""
+    html = ""
+    parts = parsed.walk() if parsed.is_multipart() else [parsed]
+    for part in parts:
+        if part.is_multipart():
+            continue
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes):
+            continue
+        text = decode_bytes(payload, part.get_content_charset())
+        kind = part.get_content_type()
+        if kind == "text/plain" and not plain:
+            plain = text
+        elif kind == "text/html" and not html:
+            html = text
+    if plain.strip():
+        return plain
+    if html.strip():
+        return html_to_text(html)
+    return ""
+
+
+def parse_message(raw: bytes, uid: str, uidvalidity: str) -> dict:
+    parsed = email.message_from_bytes(raw)
+    sender = email.utils.parseaddr(_header(parsed.get("From")))
+    message_id = _header(parsed.get("Message-Id")).strip().strip("<>")
+    if not message_id:
+        message_id = f"imap-{uidvalidity}-{uid}"
+    return {
+        "id": message_id,
+        "from_name": sender[0],
+        "from_email": sender[1],
+        "subject": _header(parsed.get("Subject")),
+        "body": message_body(parsed),
+        "received_at": normalize_date(_header(parsed.get("Date"))),
+        "auto_submitted": _header(parsed.get("Auto-Submitted")),
+        "imap_uid": uid,
+        "status": "new",
+    }
+
+
+def _uidvalidity(client, folder: str) -> str:
+    try:
+        status, data = client.status(folder, "(UIDVALIDITY)")
+    except Exception:
+        logger.warning("imap_uidvalidity_failed", exc_info=True)
+        return "0"
+    if status != "OK" or not data:
+        return "0"
+    blob = data[0].decode(errors="replace") if isinstance(data[0], bytes) else str(data[0])
+    found = re.search(r"UIDVALIDITY\s+(\d+)", blob, re.IGNORECASE)
+    return found.group(1) if found else "0"
+
+
+def _payload_bytes(fetched) -> bytes | None:
+    if not fetched or fetched[0] != "OK" or not fetched[1]:
+        return None
+    for item in fetched[1]:
+        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
+            return item[1]
+    return None
+
+
+def read_unseen(client, folder: str = "INBOX", limit: int = FETCH_CAP) -> list[dict]:
+    """Parse UNSEEN mail without marking it seen. One bad message does not stop the pass."""
+    client.select(folder)
+    status, data = client.uid("SEARCH", None, "UNSEEN")
+    if status != "OK" or not data or not data[0]:
+        return []
+    uids = data[0].split()[:limit]
+    validity = _uidvalidity(client, folder)
+    messages = []
+    for uid in uids:
+        token = uid.decode() if isinstance(uid, bytes) else str(uid)
+        try:
+            fetched = client.uid("FETCH", token, "(BODY.PEEK[])")
+            raw = _payload_bytes(fetched)
+            if raw is None:
+                logger.warning("imap_empty_fetch uid=%s", token)
+                continue
+            messages.append(parse_message(raw, token, validity))
+        except Exception:
+            logger.warning("imap_skip uid=%s", token, exc_info=True)
+    return messages
+
+
+def mark_seen(client, uid: str) -> None:
+    client.uid("STORE", uid, "+FLAGS", "\\Seen")
 
 
 class MockImapMailbox:
@@ -36,11 +151,16 @@ class MockImapMailbox:
     name = "mock-imap"
 
     def fetch_unseen(self) -> list[dict]:
+        from app import db
+
         return db.list_emails(status="new")
+
+    def mark_seen(self, uid: str | None) -> None:
+        return None
 
 
 class ImapMailbox:
-    """Gmail or Outlook over IMAP. Basic auth / app passwords only."""
+    """Gmail or Outlook over IMAP. Basic auth, with a socket timeout."""
 
     name = "imap"
 
@@ -49,57 +169,40 @@ class ImapMailbox:
         self.user = os.environ["IMAP_USER"]
         self.password = os.environ["IMAP_PASSWORD"]
         self.folder = os.environ.get("IMAP_FOLDER", "INBOX")
+        self._client: imaplib.IMAP4_SSL | None = None
+
+    def _open(self) -> imaplib.IMAP4_SSL:
+        if self._client is None:
+            self._client = imaplib.IMAP4_SSL(self.host, timeout=30)
+            self._client.login(self.user, self.password)
+        return self._client
 
     def fetch_unseen(self) -> list[dict]:
-        client = imaplib.IMAP4_SSL(self.host)
         try:
-            client.login(self.user, self.password)
-            client.select(self.folder)
-            status, data = client.search(None, "UNSEEN")
-            if status != "OK" or not data or not data[0]:
-                return []
-            messages = []
-            for number in data[0].split():
-                fetched = client.fetch(number, "(RFC822)")
-                if fetched[0] != "OK" or not fetched[1]:
-                    continue
-                payload = fetched[1][0]
-                if not isinstance(payload, tuple):
-                    continue
-                parsed = email.message_from_bytes(payload[1])
-                body = _body(parsed)
-                sender = email.utils.parseaddr(_header(parsed.get("From")))
-                messages.append(
-                    {
-                        "id": _header(parsed.get("Message-Id")) or f"imap-{number.decode()}",
-                        "from_name": sender[0],
-                        "from_email": sender[1],
-                        "subject": _header(parsed.get("Subject")),
-                        "body": body,
-                        "received_at": _header(parsed.get("Date")),
-                        "status": "new",
-                    }
-                )
-            return messages
+            return read_unseen(self._open(), self.folder, FETCH_CAP)
         finally:
-            try:
-                client.logout()
-            except Exception:
-                pass
+            self.close()
 
+    def mark_seen(self, uid: str | None) -> None:
+        if not uid:
+            return
+        try:
+            client = self._open()
+            client.select(self.folder)
+            mark_seen(client, uid)
+        except Exception:
+            logger.warning("imap_mark_seen_failed uid=%s", uid, exc_info=True)
+        finally:
+            self.close()
 
-def _body(parsed: email.message.Message) -> str:
-    if parsed.is_multipart():
-        for part in parsed.walk():
-            if part.get_content_type() == "text/plain":
-                content = part.get_payload(decode=True)
-                if isinstance(content, bytes):
-                    return content.decode(part.get_content_charset() or "utf-8", errors="replace")
-        return ""
-    content = parsed.get_payload(decode=True)
-    if isinstance(content, bytes):
-        return content.decode(parsed.get_content_charset() or "utf-8", errors="replace")
-    return _decode(parsed.get_payload())
+    def close(self) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.logout()
+        except Exception:
+            pass
+        self._client = None
 
 
 def mailbox_mode() -> str:

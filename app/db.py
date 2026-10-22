@@ -5,10 +5,22 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
+_CONN: sqlite3.Connection | None = None
+_CONN_PATH: str | None = None
+
+BODY_PREVIEW = 500
+
+
+class DraftLocked(Exception):
+    """An approved reply cannot be edited in place."""
+
+
+class AlreadyApproved(Exception):
+    """Approve was already recorded for this triage row."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -34,7 +46,11 @@ CREATE TABLE IF NOT EXISTS triage (
   model TEXT NOT NULL,
   approved INTEGER NOT NULL DEFAULT 0,
   edited INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  risk_flags TEXT NOT NULL DEFAULT '',
+  secondary_categories TEXT NOT NULL DEFAULT '',
+  llm_error TEXT,
+  forwarded_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS leads (
@@ -49,7 +65,9 @@ CREATE TABLE IF NOT EXISTS leads (
   source_subject TEXT,
   status TEXT NOT NULL,
   destination TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  remote_status TEXT NOT NULL DEFAULT '',
+  remote_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -71,6 +89,12 @@ CREATE TABLE IF NOT EXISTS runs (
   alerts INTEGER NOT NULL,
   ingested INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS worker_lock (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -86,16 +110,44 @@ def database_path() -> Path:
 
 
 def connect() -> sqlite3.Connection:
+    """One connection per process. WAL and the lock keep workers from trampling it."""
+    global _CONN, _CONN_PATH
     path = database_path()
+    if _CONN is not None and _CONN_PATH == str(path):
+        return _CONN
+    if _CONN is not None:
+        _CONN.close()
+        _CONN = None
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    _CONN = conn
+    _CONN_PATH = str(path)
     return conn
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def init_db() -> None:
     with _LOCK, connect() as conn:
         conn.executescript(SCHEMA)
+        for column, ddl in (
+            ("risk_flags", "TEXT NOT NULL DEFAULT ''"),
+            ("secondary_categories", "TEXT NOT NULL DEFAULT ''"),
+            ("llm_error", "TEXT"),
+            ("forwarded_by", "TEXT"),
+        ):
+            if column not in _columns(conn, "triage"):
+                conn.execute(f"ALTER TABLE triage ADD COLUMN {column} {ddl}")
+        for column, ddl in (
+            ("remote_status", "TEXT NOT NULL DEFAULT ''"),
+            ("remote_error", "TEXT"),
+        ):
+            if column not in _columns(conn, "leads"):
+                conn.execute(f"ALTER TABLE leads ADD COLUMN {column} {ddl}")
 
 
 def _rows(query: str, params: tuple = ()) -> list[dict]:
@@ -151,14 +203,29 @@ def set_status(email_id: str, status: str) -> None:
         conn.execute("UPDATE emails SET status = ? WHERE id = ?", (status, email_id))
 
 
-def save_triage(email_id: str, result: dict) -> dict:
+def _csv(value: object) -> str:
+    if isinstance(value, list):
+        return ",".join(str(item) for item in value if item)
+    return str(value or "")
+
+
+def save_triage(email_id: str, result: dict, force: bool = False) -> dict:
     with _LOCK, connect() as conn:
-        conn.execute(
+        existing = conn.execute(
+            "SELECT approved FROM triage WHERE email_id = ?",
+            (email_id,),
+        ).fetchone()
+        if existing and existing["approved"] and not force:
+            locked = True
+        else:
+            locked = False
+            conn.execute(
             """
             INSERT INTO triage (
               email_id, category, confidence, name, company, budget, intent,
-              draft_reply, model, approved, edited, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+              draft_reply, model, approved, edited, created_at,
+              risk_flags, secondary_categories, llm_error, forwarded_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
             ON CONFLICT(email_id) DO UPDATE SET
               category = excluded.category,
               confidence = excluded.confidence,
@@ -167,7 +234,12 @@ def save_triage(email_id: str, result: dict) -> dict:
               budget = excluded.budget,
               intent = excluded.intent,
               draft_reply = excluded.draft_reply,
-              model = excluded.model
+              model = excluded.model,
+              risk_flags = excluded.risk_flags,
+              secondary_categories = excluded.secondary_categories,
+              llm_error = excluded.llm_error,
+              forwarded_by = excluded.forwarded_by
+            WHERE triage.approved = 0
             """,
             (
                 email_id,
@@ -180,28 +252,33 @@ def save_triage(email_id: str, result: dict) -> dict:
                 result["draft_reply"],
                 result.get("model", "rules"),
                 now(),
+                _csv(result.get("risk_flags")),
+                _csv(result.get("secondary_categories")),
+                result.get("llm_error"),
+                result.get("forwarded_by"),
             ),
         )
-        conn.execute(
-            "UPDATE emails SET status = 'triaged' WHERE id = ?",
-            (email_id,),
-        )
+            conn.execute(
+                "UPDATE emails SET status = 'triaged' WHERE id = ?",
+                (email_id,),
+            )
     found = get_triage_by_email(email_id)
     if found is None:
         raise RuntimeError(f"Triage for {email_id} was not stored")
     return found
 
 
-def list_triage() -> list[dict]:
-    return _rows(
-        """
+def list_triage(limit: int | None = 50, offset: int = 0) -> list[dict]:
+    query = """
         SELECT t.*, e.subject, e.from_name AS mailbox_name, e.from_email,
                e.body, e.received_at, e.status AS email_status
         FROM triage t
         JOIN emails e ON e.id = t.email_id
         ORDER BY e.received_at DESC
-        """
-    )
+    """
+    if limit is None:
+        return _rows(query)
+    return _rows(query + " LIMIT ? OFFSET ?", (limit, offset))
 
 
 def get_triage(triage_id: int) -> dict | None:
@@ -223,6 +300,11 @@ def get_triage_by_email(email_id: str) -> dict | None:
 
 def update_draft(triage_id: int, draft_reply: str) -> dict | None:
     with _LOCK, connect() as conn:
+        row = conn.execute("SELECT approved FROM triage WHERE id = ?", (triage_id,)).fetchone()
+        if row is None:
+            return None
+        if row["approved"]:
+            raise DraftLocked(triage_id)
         conn.execute(
             "UPDATE triage SET draft_reply = ?, edited = 1 WHERE id = ?",
             (draft_reply, triage_id),
@@ -232,13 +314,17 @@ def update_draft(triage_id: int, draft_reply: str) -> dict | None:
 
 def approve(triage_id: int) -> dict | None:
     with _LOCK, connect() as conn:
+        row = conn.execute("SELECT approved, email_id FROM triage WHERE id = ?", (triage_id,)).fetchone()
+        if row is None:
+            return None
+        if row["approved"]:
+            raise AlreadyApproved(triage_id)
         conn.execute("UPDATE triage SET approved = 1 WHERE id = ?", (triage_id,))
         row = conn.execute("SELECT email_id FROM triage WHERE id = ?", (triage_id,)).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE leads SET status = 'Reply approved' WHERE email_id = ?",
-                (row["email_id"],),
-            )
+        conn.execute(
+            "UPDATE leads SET status = 'Reply approved' WHERE email_id = ?",
+            (row["email_id"],),
+        )
     return get_triage(triage_id)
 
 
@@ -248,8 +334,8 @@ def upsert_lead(lead: dict) -> dict:
             """
             INSERT INTO leads (
               email_id, name, company, email, budget, intent, category,
-              source_subject, status, destination, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              source_subject, status, destination, created_at, remote_status, remote_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(email_id) DO UPDATE SET
               name = excluded.name,
               company = excluded.company,
@@ -258,7 +344,9 @@ def upsert_lead(lead: dict) -> dict:
               intent = excluded.intent,
               category = excluded.category,
               source_subject = excluded.source_subject,
-              destination = excluded.destination
+              destination = excluded.destination,
+              remote_status = excluded.remote_status,
+              remote_error = excluded.remote_error
             """,
             (
                 lead["email_id"],
@@ -270,8 +358,10 @@ def upsert_lead(lead: dict) -> dict:
                 lead.get("category", "lead"),
                 lead.get("source_subject"),
                 lead.get("status", "Reply pending"),
-                lead.get("destination", "sqlite"),
+                lead.get("destination", "mock"),
                 now(),
+                lead.get("remote_status", ""),
+                lead.get("remote_error"),
             ),
         )
     found = _one("SELECT * FROM leads WHERE email_id = ?", (lead["email_id"],))
@@ -352,7 +442,53 @@ def clear_all() -> None:
         conn.execute("DELETE FROM emails")
 
 
-def public_triage(row: dict) -> dict:
+def count_fallbacks() -> int:
+    row = _one("SELECT COUNT(*) AS n FROM triage WHERE model = 'rules-fallback'")
+    return int(row["n"]) if row else 0
+
+
+def acquire_worker_lock(owner: str, ttl_seconds: int = 180) -> bool:
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).replace(microsecond=0).isoformat()
+    with _LOCK:
+        conn = connect()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("INSERT OR IGNORE INTO worker_lock (id, owner, expires_at) VALUES (1, '', '')")
+            current = conn.execute("SELECT owner, expires_at FROM worker_lock WHERE id = 1").fetchone()
+            free = (
+                current is None
+                or not current["owner"]
+                or current["owner"] == owner
+                or (current["expires_at"] or "") < now()
+            )
+            if not free:
+                conn.rollback()
+                return False
+            conn.execute(
+                "UPDATE worker_lock SET owner = ?, expires_at = ? WHERE id = 1",
+                (owner, expires),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def release_worker_lock(owner: str) -> None:
+    with _LOCK, connect() as conn:
+        conn.execute(
+            "UPDATE worker_lock SET owner = '', expires_at = '' WHERE id = 1 AND owner = ?",
+            (owner,),
+        )
+
+
+def public_triage(row: dict, full_body: bool = False) -> dict:
+    body = row.get("body") or ""
+    if not full_body and len(body) > BODY_PREVIEW:
+        body = body[:BODY_PREVIEW]
+    flags = [item for item in (row.get("risk_flags") or "").split(",") if item]
+    secondary = [item for item in (row.get("secondary_categories") or "").split(",") if item]
     return {
         "id": row["id"],
         "email_id": row["email_id"],
@@ -368,8 +504,12 @@ def public_triage(row: dict) -> dict:
         "edited": bool(row["edited"]),
         "created_at": row["created_at"],
         "subject": row.get("subject"),
-        "from_name": row.get("mailbox_name"),
+        "from_name": row.get("mailbox_name") or row.get("from_name"),
         "from_email": row.get("from_email"),
-        "body": row.get("body"),
+        "body": body,
         "received_at": row.get("received_at"),
+        "risk_flags": flags,
+        "secondary_categories": secondary,
+        "llm_error": row.get("llm_error"),
+        "forwarded_by": row.get("forwarded_by"),
     }

@@ -1,24 +1,7 @@
 """Pipeline, CRM, and approval behavior against a throwaway mailbox."""
 
-import pytest
-from fastapi.testclient import TestClient
-
 from app.crm import active_adapters, highlevel_payload, hubspot_properties
-
-
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "triage.db"))
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("HUBSPOT_TOKEN", raising=False)
-    monkeypatch.delenv("GHL_API_KEY", raising=False)
-    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
-    monkeypatch.setenv("WORKER_ENABLED", "false")
-    from app.main import app
-
-    with TestClient(app) as test_client:
-        yield test_client
+from tests.conftest import signed_body
 
 
 def test_health_reports_demo_mode(client):
@@ -97,19 +80,18 @@ def test_classify_endpoint_is_stateless(client):
 
 
 def test_webhook_is_classified_when_the_worker_runs(client):
-    created = client.post(
-        "/api/webhooks/email",
-        json={
-            "from_name": "Nina Shah",
-            "from_email": "nina.shah@northwindlogistics.com",
-            "subject": "Proposal for a classifier on our shared mailbox",
-            "body": (
-                "Hi Asad,\n\nWe are looking for a proposal. Budget is $9,000.\n\n"
-                "Thanks,\nNina Shah\nDirector\nNorthwind Logistics\n"
-                "nina.shah@northwindlogistics.com\n"
-            ),
-        },
-    )
+    payload = {
+        "from_name": "Nina Shah",
+        "from_email": "nina.shah@northwindlogistics.com",
+        "subject": "Proposal for a classifier on our shared mailbox",
+        "body": (
+            "Hi Asad,\n\nWe are looking for a proposal. Budget is $9,000.\n\n"
+            "Thanks,\nNina Shah\nDirector\nNorthwind Logistics\n"
+            "nina.shah@northwindlogistics.com\n"
+        ),
+    }
+    raw, headers = signed_body(payload)
+    created = client.post("/api/webhooks/email", content=raw, headers=headers)
     assert created.status_code == 200
     assert created.json()["status"] == "queued"
     assert client.get("/api/stats").json()["waiting"] == 9
@@ -133,6 +115,127 @@ def test_adapter_list_starts_with_the_mock_crm(monkeypatch):
     assert [adapter.name for adapter in active_adapters()] == ["mock", "hubspot"]
 
 
+def test_desk_routes_require_a_bearer_token(client):
+    denied = client.get("/api/triage", headers={"Authorization": "Bearer wrong"})
+    assert denied.status_code == 401
+    denied = client.get("/api/crm/leads", headers={"Authorization": "Bearer wrong"})
+    assert denied.status_code == 401
+    denied = client.post("/api/worker/run", headers={"Authorization": "Bearer wrong"})
+    assert denied.status_code == 401
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/stats").status_code == 200
+
+
+def test_webhook_signature_and_idempotency(client):
+    unsigned = client.post(
+        "/api/webhooks/email",
+        json={"from_email": "a@b.co", "subject": "Hi", "body": "Hello"},
+    )
+    assert unsigned.status_code == 401
+    payload = {
+        "from_email": "ada@example.com",
+        "from_name": "Ada Lovelace",
+        "subject": "Retainer",
+        "body": "Budget is $4,000.\n\nThanks,\nAda Lovelace\nAnalytical Engines",
+        "received_at": "2026-10-22T12:00:00+00:00",
+    }
+    raw, headers = signed_body(payload)
+    first = client.post("/api/webhooks/email", content=raw, headers=headers)
+    second = client.post("/api/webhooks/email", content=raw, headers=headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "queued"
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["id"] == first.json()["id"]
+
+
+def test_oversized_body_is_rejected(client):
+    raw = b'{"subject":"s","body":"' + (b"x" * 300_000) + b'"}'
+    response = client.post("/api/classify", content=raw, headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_triage_list_is_a_preview_and_detail_is_full(client):
+    payload = {
+        "from_email": "ada@example.com",
+        "from_name": "Ada Lovelace",
+        "subject": "Long note",
+        "body": "Budget is $4,000.\n" + ("detail " * 400) + "\nThanks,\nAda Lovelace\nAnalytical Engines",
+        "received_at": "2026-10-22T12:00:00+00:00",
+    }
+    raw, headers = signed_body(payload)
+    created = client.post("/api/webhooks/email", content=raw, headers=headers)
+    assert created.status_code == 200
+    client.post("/api/worker/run")
+    listed = client.get("/api/triage?limit=50").json()["items"]
+    match = next(item for item in listed if item["email_id"] == created.json()["id"])
+    assert len(match["body"]) <= 500
+    detail = client.get(f"/api/triage/{match['id']}").json()
+    assert len(detail["body"]) > 500
+
+
+def test_approval_locks_the_draft_and_does_not_alert_twice(client):
+    jane = next(item for item in client.get("/api/triage").json()["items"] if item["email_id"] == "m01")
+    assert client.post(f"/api/triage/{jane['id']}/approve").status_code == 200
+    alerts = client.get("/api/alerts").json()["alerts"]
+    again = client.post(f"/api/triage/{jane['id']}/approve")
+    assert again.status_code == 409
+    assert len(client.get("/api/alerts").json()["alerts"]) == len(alerts)
+    edited = client.post(f"/api/triage/{jane['id']}/draft", json={"draft_reply": "Changed after approval."})
+    assert edited.status_code == 409
+    from app import db
+
+    db.save_triage(
+        "m01",
+        {
+            "category": "spam",
+            "confidence": 0.4,
+            "name": "Someone",
+            "company": "Else",
+            "budget": "$1",
+            "intent": "nope",
+            "draft_reply": "overwritten",
+            "model": "rules",
+        },
+    )
+    stored = db.get_triage(jane["id"])
+    assert stored["draft_reply"] != "overwritten"
+    assert stored["category"] != "spam"
+
+
+def test_reset_is_refused_outside_demo_and_when_imap_is_set(client, monkeypatch):
+    monkeypatch.setenv("IMAP_HOST", "imap.example.com")
+    assert client.post("/api/demo/reset").status_code == 409
+    monkeypatch.delenv("IMAP_HOST")
+    monkeypatch.setenv("DEMO_MODE", "false")
+    assert client.post("/api/demo/reset").status_code == 404
+
+
+def test_worker_lock_skips_a_second_pass(client):
+    from app import db
+
+    assert db.acquire_worker_lock("held-by-test")
+    body = client.post("/api/worker/run").json()
+    assert body["skipped"] == "locked"
+    db.release_worker_lock("held-by-test")
+
+
+def test_cors_allows_the_desk_origin_only(client):
+    ok = client.get("/api/health", headers={"Origin": "http://127.0.0.1:8742"})
+    assert ok.headers.get("access-control-allow-origin") == "http://127.0.0.1:8742"
+    blocked = client.get("/api/health", headers={"Origin": "http://evil.example"})
+    assert blocked.headers.get("access-control-allow-origin") is None
+    preflight = client.options(
+        "/api/triage",
+        headers={
+            "Origin": "http://127.0.0.1:8742",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers.get("access-control-allow-origin") == "http://127.0.0.1:8742"
+
+
 def test_crm_payloads_match_hubspot_and_gohighlevel():
     lead = {
         "name": "Jane Cole",
@@ -149,3 +252,95 @@ def test_crm_payloads_match_hubspot_and_gohighlevel():
     assert highlevel["companyName"] == "Acme Robotics"
     assert highlevel["source"] == "Lane inbox triage"
     assert "lane" in highlevel["tags"]
+
+
+def test_remote_crm_upserts_and_records_failures(client, monkeypatch):
+    import httpx
+
+    from app.crm import store_lead
+
+    calls: list[str] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        request = httpx.Request("POST", url)
+        return httpx.Response(500, json={"ok": False}, request=request)
+
+    monkeypatch.setenv("HUBSPOT_TOKEN", "pat-test")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    failed = store_lead(
+        {
+            "email_id": "remote-1",
+            "name": "Ada Lovelace",
+            "company": "Analytical Engines",
+            "email": "ada@example.com",
+            "budget": "$4,000",
+            "intent": "request a proposal",
+            "category": "lead",
+            "source_subject": "Retainer",
+            "status": "Reply pending",
+        }
+    )
+    assert calls[0].endswith("/crm/v3/objects/contacts/batch/upsert")
+    assert len(calls) == 2
+    assert failed["remote_status"] == "error"
+    assert "500" in failed["remote_error"]
+
+    calls.clear()
+    skipped = store_lead(
+        {
+            "email_id": "remote-2",
+            "name": None,
+            "email": "",
+            "category": "lead",
+            "status": "Reply pending",
+        }
+    )
+    assert calls == []
+    assert skipped["remote_status"] == "skipped"
+    assert skipped["remote_error"] == "no email"
+
+    def ok_post(url, headers=None, json=None, timeout=None):
+        calls.append(url)
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    monkeypatch.delenv("HUBSPOT_TOKEN")
+    monkeypatch.setenv("GHL_API_KEY", "ghl-test")
+    monkeypatch.setenv("GHL_LOCATION_ID", "loc-1")
+    monkeypatch.setattr(httpx, "post", ok_post)
+    stored = store_lead(
+        {
+            "email_id": "remote-3",
+            "name": "Ada Lovelace",
+            "email": "ada@example.com",
+            "category": "lead",
+            "status": "Reply pending",
+        }
+    )
+    assert calls == ["https://services.leadconnectorhq.com/contacts/upsert"]
+    assert stored["remote_status"] == "ok"
+
+
+def test_slack_text_is_escaped_and_failures_are_recorded(client, monkeypatch):
+    import httpx
+
+    from app.alerts import post_alert, render_alert
+
+    title, body = render_alert(
+        "lead",
+        {"name": "A & B <script>", "company": "Co", "budget": "$1", "intent": "hire", "subject": "Hi"},
+    )
+    assert "&amp;" in body
+    assert "&lt;" in body
+    assert "<script>" not in body
+
+    def fail(url, json=None, timeout=None):
+        request = httpx.Request("POST", url)
+        return httpx.Response(500, json={"ok": False}, request=request)
+
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/slack")
+    monkeypatch.setattr(httpx, "post", fail)
+    stored = post_alert("lead", {"email_id": "m01", "name": "Jane", "subject": "Hi"})
+    assert stored["delivered"] is False
+    assert stored["delivery_error"] == "HTTP 500"

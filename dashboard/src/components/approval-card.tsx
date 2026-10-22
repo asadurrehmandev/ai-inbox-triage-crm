@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -21,13 +21,21 @@ export function ApprovalCard({
   onSave: (draft: string) => Promise<void>;
   onApprove: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(item.draft_reply);
-  const [note, setNote] = useState<string | null>(null);
+  const [override, setOverride] = useState<{ id: number; saved: string; text: string } | null>(null);
+  const [noteState, setNoteState] = useState<{ id: number; text: string } | null>(null);
+  const draft =
+    override && override.id === item.id && override.saved === item.draft_reply
+      ? override.text
+      : item.draft_reply;
+  const note = noteState && noteState.id === item.id ? noteState.text : null;
 
-  useEffect(() => {
-    setDraft(item.draft_reply);
-    setNote(null);
-  }, [item.id, item.draft_reply]);
+  function setDraft(text: string) {
+    setOverride({ id: item.id, saved: item.draft_reply, text });
+  }
+
+  function setNote(text: string) {
+    setNoteState({ id: item.id, text });
+  }
 
   const dirty = draft !== item.draft_reply;
   const color = CATEGORY_COLOR[item.category] ?? "#1c1915";
@@ -52,6 +60,9 @@ export function ApprovalCard({
         <p className="mt-2 text-sm text-muted-foreground">
           {item.from_name || "Unknown sender"} · {item.from_email}
         </p>
+        {item.llm_error ? (
+          <p className="mt-2 text-xs text-muted-foreground">Rules fallback: {item.llm_error}</p>
+        ) : null}
       </header>
 
       <div className="grid gap-6 px-5 py-5 md:px-8 lg:grid-cols-[minmax(0,1fr)_280px]">
@@ -69,7 +80,7 @@ export function ApprovalCard({
       <div className="flex flex-1 flex-col gap-3 px-5 pb-8 md:px-8">
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-sm tracking-[0.14em] uppercase text-muted-foreground">
-            {item.category === "spam" ? "Internal note" : "Draft reply"}
+            {item.category === "spam" || item.category === "suspicious" ? "Internal note" : "Draft reply"}
           </h2>
           <p className="text-xs text-muted-foreground">
             {item.approved
@@ -85,9 +96,11 @@ export function ApprovalCard({
           className="min-h-40 bg-card font-serif text-base leading-7"
           aria-label="Draft reply"
         />
-        {item.category === "spam" ? (
+        {item.category === "spam" || item.category === "suspicious" ? (
           <p className="text-sm text-muted-foreground">
-            Spam is not answered and is not written to the CRM.
+            {item.category === "suspicious"
+              ? "Flagged before classification. Do not pay, do not reply, and do not write this to the CRM."
+              : "Spam is not answered and is not written to the CRM."}
           </p>
         ) : null}
         <div className="flex flex-wrap gap-2">
@@ -111,7 +124,7 @@ export function ApprovalCard({
               setNote(item.category === "spam" ? "Archived." : "Reply approved.");
             }}
           >
-            {item.category === "spam" ? "Approve and archive" : "Approve reply"}
+            {item.category === "spam" || item.category === "suspicious" ? "Approve and archive" : "Approve reply"}
           </Button>
         </div>
         {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}

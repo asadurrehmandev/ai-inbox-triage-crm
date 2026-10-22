@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
+import uuid
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app import db
 from app.mailbox import get_mailbox
 from app.pipeline import process_pending
+
+logger = logging.getLogger("lane.worker")
 
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
@@ -29,6 +33,17 @@ def worker_enabled() -> bool:
 
 def run_once(source: str = "scheduler") -> dict:
     """One pass: pull IMAP if configured, classify every unseen message, file leads."""
+    owner = f"{source}-{uuid.uuid4().hex[:8]}"
+    if not db.acquire_worker_lock(owner):
+        logger.warning("worker_skipped_locked source=%s", source)
+        return {"source": source, "processed": 0, "skipped": "locked", "results": []}
+    try:
+        return _run_locked(source)
+    finally:
+        db.release_worker_lock(owner)
+
+
+def _run_locked(source: str) -> dict:
     with _lock:
         started = db.now()
         ingested = 0
@@ -37,10 +52,14 @@ def run_once(source: str = "scheduler") -> dict:
             for message in mailbox.fetch_unseen():
                 if not message.get("id"):
                     continue
-                existed = db.get_email(message["id"]) is not None
-                db.insert_email(message)
-                if not existed:
-                    ingested += 1
+                try:
+                    existed = db.get_email(message["id"]) is not None
+                    db.insert_email(message)
+                    mailbox.mark_seen(message.get("imap_uid"))
+                    if not existed:
+                        ingested += 1
+                except Exception:
+                    logger.warning("imap_store_failed id=%s", message.get("id"), exc_info=True)
         results = process_pending()
         finished = db.now()
         run = db.insert_run(

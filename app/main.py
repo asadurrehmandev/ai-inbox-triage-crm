@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import logging
+import os
 from contextlib import asynccontextmanager
-from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 from app import alerts, crm, db
 from app.classifier import Classification
 from app.llm import classify_email, select_provider
 from app.mailbox import mailbox_mode
 from app.pipeline import push_lead, save_classification
+from app.db import AlreadyApproved, DraftLocked
+from app.llm import anthropic_model
 from app.seed import reset_demo, seed_if_empty
 from app.worker import run_once, start_worker, status as worker_status, stop_worker
+
+logger = logging.getLogger("lane")
+BODY_LIMIT = 256 * 1024
 
 MINUTES_PER_EMAIL = 6
 PROJECTED_DAILY_VOLUME = 80
@@ -33,12 +45,63 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Lane inbox triage", version="1.0.0", lifespan=lifespan)
+
+
+def _origins() -> list[str]:
+    raw = os.environ.get("CORS_ORIGINS", "http://127.0.0.1:8742,http://localhost:8742")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_origins(),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type", "X-Lane-Signature"],
 )
+
+
+def _demo_enabled() -> bool:
+    return os.environ.get("DEMO_MODE", "true").strip().lower() in {"1", "true", "yes"}
+
+
+def _authorized(request: Request) -> bool:
+    token = os.environ.get("API_TOKEN", "").strip()
+    header = request.headers.get("authorization", "")
+    if not token or not header.lower().startswith("bearer "):
+        return False
+    presented = header.split(" ", 1)[1].strip()
+    return hmac.compare_digest(presented, token)
+
+
+def _needs_token(request: Request) -> bool:
+    path = request.url.path
+    if path.startswith("/api/webhooks/"):
+        return False
+    if request.method != "GET":
+        return True
+    return path.startswith(("/api/triage", "/api/crm", "/api/alerts"))
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    # Browsers send OPTIONS without the bearer token. CORS answers it.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > BODY_LIMIT:
+        return JSONResponse({"detail": "payload too large"}, status_code=413)
+    if request.method in {"POST", "PUT", "PATCH"}:
+        body = await request.body()
+        if len(body) > BODY_LIMIT:
+            return JSONResponse({"detail": "payload too large"}, status_code=413)
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request = Request(request.scope, receive)
+    if _needs_token(request) and not _authorized(request):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 class EmailIn(BaseModel):
@@ -126,33 +189,40 @@ def health() -> dict:
         "mailbox": mailbox_mode(),
         "crm": crm.destination_label(),
         "worker": worker_status(),
+        "fallbacks": db.count_fallbacks(),
+        "anthropic_model": anthropic_model(),
     }
 
 
 @app.get("/api/stats")
 def stats() -> dict:
     emails = db.list_emails()
-    triage = db.list_triage()
+    triage = db.list_triage(limit=None)
     leads = db.list_leads()
-    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent")}
+    by_category = {name: 0 for name in ("lead", "support", "invoice", "spam", "urgent", "suspicious")}
     approved = 0
     for item in triage:
         by_category[item["category"]] = by_category.get(item["category"], 0) + 1
         if item["approved"]:
             approved += 1
+    actionable = [item for item in triage if item["category"] not in {"spam", "suspicious"}]
     processed = len(triage)
+    actionable_count = len(actionable)
+    approved = sum(1 for item in actionable if item["approved"])
     return {
         "processed": processed,
         "waiting": sum(1 for email in emails if email["status"] == "new"),
-        "pending_approval": processed - approved,
+        "pending_approval": actionable_count - approved,
         "approved": approved,
         "leads": len(leads),
         "alerts": len(db.list_alerts()),
         "by_category": by_category,
-        "hours_saved": round(processed * MINUTES_PER_EMAIL / 60, 1),
+        "hours_saved": round(actionable_count * MINUTES_PER_EMAIL / 60, 1),
+        "hours_saved_note": "Spam and suspicious mail are not counted. The daily figure is an assumption, not a measurement.",
         "minutes_per_email": MINUTES_PER_EMAIL,
         "projected_daily_hours": round(PROJECTED_DAILY_VOLUME * MINUTES_PER_EMAIL / 60, 1),
         "projected_daily_volume": PROJECTED_DAILY_VOLUME,
+        "fallbacks": db.count_fallbacks(),
         "mode": select_provider(),
         "mailbox": mailbox_mode(),
         "crm": crm.destination_label(),
@@ -164,10 +234,41 @@ def pending() -> dict:
     return {"emails": db.list_emails(status="new")}
 
 
+def _identity(payload: WebhookEmail) -> str:
+    if payload.message_id and payload.message_id.strip():
+        return payload.message_id.strip()
+    raw = "|".join(
+        [
+            payload.from_email,
+            payload.subject,
+            payload.received_at or "",
+            payload.body[:2000],
+        ]
+    )
+    return "wh-" + hashlib.sha256(raw.encode()).hexdigest()[:20]
+
+
+def _signature_ok(raw: bytes, header: str) -> bool:
+    secret = os.environ.get("WEBHOOK_SECRET", "").strip()
+    if not secret or not header.startswith("sha256="):
+        return False
+    expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(header, expected)
+
+
 @app.post("/api/webhooks/email")
-def ingest_email(payload: WebhookEmail) -> dict:
-    """Inbound mail from Gmail forwarding, Outlook, or any HTTP hook."""
-    email_id = (payload.message_id or "").strip() or f"wh-{uuid4().hex[:10]}"
+async def ingest_email(request: Request) -> dict:
+    """Inbound mail. The body must be signed with WEBHOOK_SECRET."""
+    raw = await request.body()
+    if not _signature_ok(raw, request.headers.get("x-lane-signature", "")):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    try:
+        payload = WebhookEmail.model_validate_json(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid webhook body") from exc
+    email_id = _identity(payload)
+    if db.get_email(email_id):
+        return {"id": email_id, "status": "duplicate"}
     db.insert_email(
         {
             "id": email_id,
@@ -234,12 +335,17 @@ def classify(payload: EmailIn) -> dict:
 def create_triage(payload: TriageIn) -> dict:
     email = _email_or_404(payload.email_id)
     stored = save_classification(email, _classification(payload))
-    return db.public_triage({**stored, "subject": email["subject"], "mailbox_name": email["from_name"], "from_email": email["from_email"], "body": email["body"], "received_at": email["received_at"]})
+    return db.public_triage(
+        {**stored, "subject": email["subject"], "mailbox_name": email["from_name"], "from_email": email["from_email"], "body": email["body"], "received_at": email["received_at"]},
+        full_body=True,
+    )
 
 
 @app.get("/api/triage")
-def triage_list() -> dict:
-    return {"items": [db.public_triage(row) for row in db.list_triage()]}
+def triage_list(limit: int = 50, offset: int = 0) -> dict:
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    return {"items": [db.public_triage(row) for row in db.list_triage(limit=limit, offset=offset)]}
 
 
 @app.get("/api/triage/{triage_id}")
@@ -247,20 +353,27 @@ def triage_detail(triage_id: int) -> dict:
     row = db.get_triage(triage_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Triage record not found")
-    return db.public_triage(row)
+    return db.public_triage(row, full_body=True)
 
 
 @app.post("/api/triage/{triage_id}/draft")
 def edit_draft(triage_id: int, payload: DraftIn) -> dict:
-    row = db.update_draft(triage_id, payload.draft_reply)
+    try:
+        row = db.update_draft(triage_id, payload.draft_reply)
+    except DraftLocked as exc:
+        logger.warning("edited after approval triage_id=%s", triage_id)
+        raise HTTPException(status_code=409, detail="edited after approval") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="Triage record not found")
-    return db.public_triage(row)
+    return db.public_triage(row, full_body=True)
 
 
 @app.post("/api/triage/{triage_id}/approve")
 def approve_reply(triage_id: int) -> dict:
-    row = db.approve(triage_id)
+    try:
+        row = db.approve(triage_id)
+    except AlreadyApproved as exc:
+        raise HTTPException(status_code=409, detail="already approved") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="Triage record not found")
     alerts.post_alert(
@@ -276,7 +389,7 @@ def approve_reply(triage_id: int) -> dict:
         title="Reply approved",
         body=f"Approved reply for {row['name'] or row['mailbox_name'] or 'the sender'} — {row['subject']}",
     )
-    return db.public_triage(row)
+    return db.public_triage(row, full_body=True)
 
 
 @app.post("/api/crm/leads")
@@ -348,6 +461,10 @@ def alert_feed() -> dict:
 
 @app.post("/api/demo/reset")
 def demo_reset() -> dict:
+    if not _demo_enabled():
+        raise HTTPException(status_code=404, detail="not found")
+    if os.environ.get("IMAP_HOST", "").strip():
+        raise HTTPException(status_code=409, detail="reset is disabled while IMAP is configured")
     count = reset_demo()
     return {"seeded": count}
 

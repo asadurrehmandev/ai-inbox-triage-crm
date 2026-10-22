@@ -4,10 +4,12 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8741/api";
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = process.env.NEXT_PUBLIC_API_TOKEN;
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
     cache: "no-store",
@@ -22,7 +24,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export function loadDesk() {
   return Promise.all([
     api<Stats>("/stats"),
-    api<{ items: Triage[] }>("/triage"),
+    api<{ items: Triage[] }>("/triage?limit=200"),
     api<{ emails: Mail[] }>("/intake/pending"),
     api<{ leads: Lead[] }>("/crm/leads"),
     api<{ alerts: Alert[] }>("/alerts"),

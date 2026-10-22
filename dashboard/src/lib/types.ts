@@ -10,6 +10,8 @@ export type Stats = {
   minutes_per_email: number;
   projected_daily_hours: number;
   projected_daily_volume: number;
+  hours_saved_note?: string;
+  fallbacks?: number;
   mode: string;
   mailbox: string;
   crm: string;
@@ -34,6 +36,8 @@ export type Triage = {
   from_email: string | null;
   body: string | null;
   received_at: string | null;
+  risk_flags?: string[];
+  llm_error?: string | null;
 };
 
 export type Mail = {
@@ -58,6 +62,8 @@ export type Lead = {
   source_subject: string | null;
   status: string;
   destination: string;
+  remote_status?: string;
+  remote_error?: string | null;
   created_at: string;
 };
 
@@ -89,7 +95,7 @@ export type Alert = {
   created_at: string;
 };
 
-export const CATEGORIES = ["lead", "support", "invoice", "spam", "urgent"] as const;
+export const CATEGORIES = ["lead", "support", "invoice", "spam", "urgent", "suspicious"] as const;
 
 export const CATEGORY_COLOR: Record<string, string> = {
   lead: "#1f6b45",
@@ -97,6 +103,7 @@ export const CATEGORY_COLOR: Record<string, string> = {
   invoice: "#8a5a12",
   spam: "#7a403c",
   urgent: "#9c3d22",
+  suspicious: "#6b3fa0",
 };
 
 export function categoryLabel(category: string) {
@@ -106,6 +113,7 @@ export function categoryLabel(category: string) {
 export function modeLabel(mode: string) {
   if (mode === "anthropic") return "Claude";
   if (mode === "openai") return "OpenAI";
+  if (mode === "rules-fallback") return "Rules fallback";
   return "Rules · no API key";
 }
 

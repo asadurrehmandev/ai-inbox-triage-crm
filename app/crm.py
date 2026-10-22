@@ -42,38 +42,60 @@ def highlevel_payload(lead: dict) -> dict:
     }
 
 
+def _post_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
+    response: httpx.Response | None = None
+    for attempt in range(2):
+        response = httpx.post(url, headers=headers, json=payload, timeout=20)
+        if response.status_code >= 500 and attempt == 0:
+            continue
+        response.raise_for_status()
+        return response
+    assert response is not None
+    response.raise_for_status()
+    return response
+
+
 def _push_hubspot(lead: dict) -> bool:
     token = os.environ.get("HUBSPOT_TOKEN", "").strip()
-    if not token:
+    email = (lead.get("email") or "").strip()
+    if not token or not email:
         return False
-    response = httpx.post(
-        "https://api.hubapi.com/crm/v3/objects/contacts",
+    properties = hubspot_properties(lead)
+    properties["lane_budget"] = lead.get("budget") or ""
+    properties["lane_intent"] = lead.get("intent") or ""
+    _post_retry(
+        "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
         headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
-        json={"properties": hubspot_properties(lead)},
-        timeout=20,
+        payload={
+            "inputs": [
+                {
+                    "idProperty": "email",
+                    "id": email,
+                    "properties": properties,
+                }
+            ]
+        },
     )
-    response.raise_for_status()
     return True
 
 
 def _push_highlevel(lead: dict) -> bool:
     token = os.environ.get("GHL_API_KEY", "").strip()
     location = os.environ.get("GHL_LOCATION_ID", "").strip()
-    if not token or not location:
+    email = (lead.get("email") or "").strip()
+    if not token or not location or not email:
         return False
     payload = highlevel_payload(lead)
     payload["locationId"] = location
-    response = httpx.post(
-        "https://services.leadconnectorhq.com/contacts/",
+    _post_retry(
+        "https://services.leadconnectorhq.com/contacts/upsert",
         headers={
             "authorization": f"Bearer {token}",
             "version": "2021-07-28",
             "content-type": "application/json",
         },
-        json=payload,
-        timeout=20,
+        payload=payload,
     )
-    response.raise_for_status()
     return True
 
 
@@ -124,8 +146,19 @@ def destination_label() -> str:
 
 def store_lead(lead: dict) -> dict:
     """Write the mock CRM, then mirror to whichever remote adapters are configured."""
+    email = (lead.get("email") or "").strip()
     remote: list[str] = []
     errors: list[str] = []
+    if not email:
+        stored = MockCrm().upsert_contact(
+            {
+                **lead,
+                "destination": "mock",
+                "remote_status": "skipped",
+                "remote_error": "no email",
+            }
+        )
+        return stored
     for adapter in active_adapters():
         if adapter.name == "mock":
             continue
@@ -133,8 +166,19 @@ def store_lead(lead: dict) -> dict:
             adapter.upsert_contact(lead)
             remote.append(adapter.name)
         except Exception as exc:
-            errors.append(f"{adapter.name}: {exc}")
-    stored = MockCrm().upsert_contact({**lead, "destination": "+".join(["mock", *remote])})
+            status = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = str(exc.response.status_code)
+            errors.append(f"{adapter.name}:{status or type(exc).__name__}")
+    status = "ok" if remote and not errors else ("error" if errors else "skipped")
+    stored = MockCrm().upsert_contact(
+        {
+            **lead,
+            "destination": "+".join(["mock", *remote]),
+            "remote_status": status,
+            "remote_error": "; ".join(errors),
+        }
+    )
     if errors:
         stored["remote_errors"] = errors
     return stored

@@ -81,6 +81,9 @@ export function useDesk() {
   }
 
   async function resetDemo() {
+    if (!window.confirm("Reset the sample mailbox? This clears the queue, the CRM, and the alerts.")) {
+      return;
+    }
     setBusy(true);
     try {
       await api("/demo/reset", { method: "POST" });

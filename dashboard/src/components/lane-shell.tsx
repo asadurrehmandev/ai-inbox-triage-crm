@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { Stats } from "@/lib/types";
 import { modeLabel } from "@/lib/types";
-import { cn } from "cn";
+import { cn } from "@/lib/utils";
 
 const LINKS = [
   { href: "/", label: "Queue" },
@@ -58,6 +58,9 @@ export function LaneShell({
             <p className="mt-1 text-xs">
               {stats ? `${stats.mailbox} · ${stats.crm}` : ""}
             </p>
+            {stats && stats.fallbacks ? (
+              <p className="mt-2 text-xs">Rules fallback on {stats.fallbacks} messages</p>
+            ) : null}
           </div>
         </aside>
         <div className="min-w-0">{children}</div>

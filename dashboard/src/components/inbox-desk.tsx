@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ApprovalCard } from "@/components/approval-card";
@@ -8,12 +8,13 @@ import { LaneShell } from "@/components/lane-shell";
 import { Metrics } from "@/components/metrics";
 import { useDesk } from "@/components/use-desk";
 import { cadence, CATEGORY_COLOR, categoryLabel, formatWhen, type Triage } from "@/lib/types";
-import { cn } from "cn";
+import { cn } from "@/lib/utils";
 
 const FILTERS = [
   { id: "approval", label: "Needs approval" },
   { id: "lead", label: "Leads" },
   { id: "urgent", label: "Urgent" },
+  { id: "suspicious", label: "Suspicious" },
   { id: "all", label: "All classified" },
 ] as const;
 
@@ -21,26 +22,22 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
   const desk = useDesk();
   const router = useRouter();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("approval");
-  const [selectedId, setSelectedId] = useState<number | null>(focusId ?? null);
+  const [pickedId, setPickedId] = useState<number | null>(null);
 
   const visible = useMemo(() => {
     return desk.items.filter((item) => {
-      if (filter === "approval") return !item.approved;
+      if (filter === "approval") return !item.approved && item.category !== "spam" && item.category !== "suspicious";
       if (filter === "all") return true;
       return item.category === filter;
     });
   }, [desk.items, filter]);
 
-  useEffect(() => {
-    if (focusId) {
-      setSelectedId(focusId);
-      return;
-    }
-    if (selectedId != null && desk.items.some((item) => item.id === selectedId)) return;
-    const preferred =
-      desk.items.find((item) => item.email_id === "m01") ?? desk.items[0] ?? null;
-    setSelectedId(preferred ? preferred.id : null);
-  }, [desk.items, focusId, selectedId]);
+  const selectedId = useMemo(() => {
+    if (focusId != null && desk.items.some((item) => item.id === focusId)) return focusId;
+    if (pickedId != null && desk.items.some((item) => item.id === pickedId)) return pickedId;
+    const preferred = desk.items.find((item) => item.email_id === "m01") ?? desk.items[0];
+    return preferred?.id ?? null;
+  }, [desk.items, focusId, pickedId]);
 
   const selected = desk.items.find((item) => item.id === selectedId) ?? null;
 
@@ -49,7 +46,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
       router.push(`/approve/${item.id}`);
       return;
     }
-    setSelectedId(item.id);
+    setPickedId(item.id);
   }
 
   return (

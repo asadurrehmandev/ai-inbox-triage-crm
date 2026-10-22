@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 .env
 data/*.db
+data/*.db-shm
+data/*.db-wal
 dashboard/node_modules/
 dashboard/.next/
 *.egg-info/

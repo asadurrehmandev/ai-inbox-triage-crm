@@ -1,10 +1,24 @@
-"use client";
-
-import { useParams } from "next/navigation";
+import { Suspense } from "react";
 import { InboxDesk } from "@/components/inbox-desk";
 
-export default function ApprovePage() {
-  const params = useParams<{ id: string }>();
-  const id = Number(params.id);
-  return <InboxDesk focusId={Number.isFinite(id) ? id : undefined} />;
+async function Desk({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const focusId = Number(id);
+  return <InboxDesk focusId={Number.isFinite(focusId) ? focusId : undefined} />;
+}
+
+export default function ApprovePage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  return (
+    <Suspense
+      fallback={
+        <p className="px-8 py-16 text-sm text-muted-foreground">Opening the draft…</p>
+      }
+    >
+      <Desk params={params} />
+    </Suspense>
+  );
 }

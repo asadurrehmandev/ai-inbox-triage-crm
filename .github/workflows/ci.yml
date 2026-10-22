@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.lock
+          pip install --no-deps .
+          pip install pytest
+      - name: Pytest
+        run: pytest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Dashboard lint and build
+        working-directory: dashboard
+        env:
+          NEXT_PUBLIC_API_BASE: http://127.0.0.1:8741/api
+          NEXT_PUBLIC_API_TOKEN: lane-demo-token
+        run: |
+          npm ci
+          npm run lint
+          npm run build

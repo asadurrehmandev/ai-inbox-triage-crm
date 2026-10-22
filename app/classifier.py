@@ -1,159 +1,106 @@
-"""Classify a business email and pull out the fields a CRM needs.
+"""Rule engine used when no model key is set, and as the visible fallback.
 
-The rule engine is the demo path: it runs with no API key. When
-ANTHROPIC_API_KEY or OPENAI_API_KEY is set, classify_email() asks that
-model and falls back here if the call fails.
+Patterns are general (outages, invoices, proposals, promotions). They are not
+a word list copied from the sample mailbox. Phishing and injection are decided
+in app.risk before any category score is trusted.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 
-CATEGORIES = ("lead", "support", "invoice", "spam", "urgent")
+from app.budget import extract_budget
+from app.prepare import head_and_tail, html_to_text, strip_injection_notes, unwrap_forward
+from app.risk import assess_risk, hard_flags
 
-# Earlier entries win when two categories land on the same score.
-PRIORITY = ("urgent", "invoice", "spam", "lead", "support")
+CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious")
 
-PATTERNS: dict[str, list[tuple[str, float]]] = {
-    "spam": [
-        (r"\bunsubscribe\b", 2),
-        (r"\b(viagra|cialis|pharmacy)\b", 6),
-        (r"\b(airdrop|bitcoin giveaway|crypto wallet)\b", 6),
-        (r"\byou(?:'ve| have) been selected\b", 5),
-        (r"\b(lottery|inheritance|beneficiary)\b", 6),
-        (r"\bdear business owner\b", 5),
-        (r"\bguest post\b", 5),
-        (r"\bwork from home\b", 5),
-        (r"\b(10x your|rank on google|seo package)\b", 4),
-        (r"\bclick below to claim\b", 5),
-        (r"\blimited time offer\b", 3),
-    ],
-    "invoice": [
-        (r"\binvoice\b", 4),
-        (r"\binv-\d+\b", 3),
-        (r"\b(past due|amount due|payment due|net\s?\d+)\b", 4),
-        (r"\bremittance\b", 5),
-        (r"\bbilling statement\b", 5),
-        (r"\bpayment received\b", 3),
-    ],
-    "urgent": [
-        (r"\b(production (is )?down|system is down|servers? (is|are) down)\b", 6),
-        (r"\boutage\b", 5),
-        (r"\b(sev-?1|p0)\b", 6),
-        (r"\b(by end of day|within the hour|in \d+ hours?)\b", 4),
-        (r"\basap\b", 2),
-        (r"\burgent\b", 1.5),
-    ],
-    "lead": [
-        (r"\b(proposal|quote|pricing|rfp)\b", 4),
-        (r"\b(discovery call|demo|kickoff)\b", 3),
-        (r"\b(retainer|freelancer)\b", 4),
-        (r"\bhire\b", 3),
-        (r"\b(budget|per month|/mo)\b", 2),
-        (r"\b(gohighlevel|hubspot)\b", 1.5),
-        (r"\b(interested in|looking for)\b", 2),
-    ],
-    "support": [
-        (r"\b(can'?t|cannot) (log|sign) ?in\b", 5),
-        (r"\b(password reset|account locked|error\s*\d{3})\b", 4),
-        (r"\b(not working|is broken|bug|failing|failed|stopped firing)\b", 4),
-        (r"\b(won'?t download|blank screen)\b", 4),
-        (r"\b(help|how do i)\b", 2),
-        (r"\b(ticket|webhook)\b", 1.5),
-    ],
-}
-
-CLOSINGS = re.compile(
-    r"^(thanks|thank you|best|regards|kind regards|sincerely|cheers|warmly),?\s*$",
+_CLOSINGS = re.compile(
+    r"^(thanks|thank you|best regards|kind regards|warm regards|many thanks|best|regards|sincerely|cheers|warmly|cordialement|saludos|mit freundlichen grüßen),?\s*$",
     re.IGNORECASE,
 )
-
-NOT_A_PERSON = {
+_ROLE = {
     "accounts",
     "payable",
     "team",
     "support",
-    "newsletter",
     "billing",
-    "ops",
     "admin",
-    "rewards",
-    "desk",
-    "notification",
-    "notifications",
+    "ops",
     "info",
     "sales",
     "marketing",
     "noreply",
+    "no-reply",
+    "newsletter",
+    "notification",
+    "notifications",
     "office",
     "bot",
     "mailer",
-    "rankings",
-    "offers",
-    "prize",
-    "center",
-    "claims",
-    "promo",
+    "rewards",
+    "desk",
+    "security",
     "system",
     "notice",
-    "security",
-    "income",
-    "home",
-    "atlas",
-    "growth",
-    "editorial",
-    "health",
-    "ap",
+    "mail",
 }
-
-TITLE_WORDS = {
+_HONORIFICS = {"dr", "mr", "mrs", "ms", "prof", "phd"}
+_TITLE_TAIL = {
     "director",
     "manager",
     "officer",
     "counsel",
-    "engineer",
-    "coordinator",
-    "founder",
-    "consultant",
-    "owner",
-    "president",
-    "specialist",
-    "administrator",
-    "attorney",
-    "partner",
-    "producer",
     "controller",
-    "accountant",
-    "bookkeeper",
-    "designer",
-    "architect",
+    "founder",
+    "president",
+    "partner",
     "principal",
-    "associate",
-    "senior",
-    "junior",
+    "engineer",
+    "accountant",
+}
+_TITLE_WORD = _TITLE_TAIL | {
     "head",
-    "vice",
-    "general",
-    "assistant",
-    "chief",
     "of",
     "the",
     "and",
+    "vice",
+    "chief",
+    "senior",
+    "junior",
+    "assistant",
+    "general",
+    "medical",
     "operations",
-    "plant",
-    "office",
-    "systems",
-    "it",
-    "accounts",
-    "account",
+    "managing",
 }
-
-MONEY = re.compile(
-    r"(?P<cur>USD|US\$|\$|€|£)\s?(?P<num>\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?",
+_TITLE_PREFIX = re.compile(
+    r"^(head of|vp of|vice president|director of|chief|medical director|general counsel)\b",
     re.IGNORECASE,
 )
-SHORTHAND = re.compile(r"(?<![A-Za-z])(\d+(?:\.\d+)?)\s*k\b", re.IGNORECASE)
+_JOB_LINE = re.compile(
+    r"^(?:(?:senior|junior|lead|head|chief|medical|office|it|systems|associate|assistant|"
+    r"general|managing|vice|operations|customer|account)\s+)*"
+    r"(?:owner|founder|co-founder|coordinator|producer|associate|director|manager|officer|"
+    r"controller|president|partner|principal|engineer|accountant|specialist|analyst|"
+    r"consultant|counsel|supervisor)$",
+    re.IGNORECASE,
+)
+_COLD = re.compile(
+    r"(qualified leads per month|we help (?:\w+ ){0,3}(?:agencies|businesses|companies)|"
+    r"reply\s+stop|can i send over|book a time on my calendar)",
+    re.IGNORECASE,
+)
+_VENDOR = re.compile(r"(trial expires|upgrade now|your trial ends)", re.IGNORECASE)
+_OOO = re.compile(
+    r"^(out of office|automatic reply|auto-?reply)\b|i am out of the office",
+    re.IGNORECASE,
+)
+_REFUND = re.compile(
+    r"\b(refund|charged twice|double[- ]charge|duplicate charge|billed twice)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -166,133 +113,296 @@ class Classification:
     intent: str
     draft_reply: str
     model: str = "rules"
+    risk_flags: list[str] = field(default_factory=list)
+    secondary_categories: list[str] = field(default_factory=list)
+    forwarded_by: str | None = None
+    contact_email: str | None = None
+    llm_error: str | None = None
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        return {
+            "category": self.category,
+            "confidence": self.confidence,
+            "name": self.name,
+            "company": self.company,
+            "budget": self.budget,
+            "intent": self.intent,
+            "draft_reply": self.draft_reply,
+            "model": self.model,
+            "risk_flags": list(self.risk_flags),
+            "secondary_categories": list(self.secondary_categories),
+            "forwarded_by": self.forwarded_by,
+            "contact_email": self.contact_email,
+            "llm_error": self.llm_error,
+        }
 
 
-def message_text(email: dict) -> str:
-    return f"{email.get('subject', '')}\n{email.get('body', '')}"
+def _plain(email: dict) -> str:
+    body = html_to_text(email.get("body") or "")
+    return head_and_tail(f"{email.get('subject', '')}\n{body}")
 
 
-def score_categories(text: str) -> dict[str, float]:
-    scores = {category: 0.0 for category in CATEGORIES}
-    for category, rules in PATTERNS.items():
-        for pattern, weight in rules:
-            if re.search(pattern, text, re.IGNORECASE):
-                scores[category] += weight
+def _score(text: str, email: dict) -> dict[str, float]:
+    scores = {name: 0.0 for name in ("lead", "support", "invoice", "spam", "urgent")}
+    lowered = text.lower()
+    sender = (email.get("from_email") or "").lower()
+
+    if re.search(r"\b(unsubscribe|opt out|manage preferences)\b", lowered):
+        scores["spam"] += 3
+    if re.search(r"\b(click below to claim|limited time offer|you(?:'ve| have) been selected)\b", lowered):
+        scores["spam"] += 5
+    if re.search(r"\b(lottery|inheritance|beneficiary|bitcoin giveaway|crypto wallet|viagra|guest post|work from home|seo package)\b", lowered):
+        scores["spam"] += 5
+    if re.search(r"\b10x your\b", lowered):
+        scores["spam"] += 4
+    if _COLD.search(lowered):
+        scores["spam"] += 6
+        scores["lead"] -= 6
+
+    if re.search(r"\b(invoice|rechnung|amount due|past due|payment due|net\s?\d+|remittance|payment received)\b", lowered):
+        scores["invoice"] += 4
+    if re.search(r"\binv-\d+\b", lowered):
+        scores["invoice"] += 3
+    if _REFUND.search(lowered):
+        scores["invoice"] += 6
+        scores["lead"] -= 5
+
+    outage = re.search(r"\b(went down|is down|are down|production is down|outage)\b", lowered)
+    impact = re.search(r"\b(every|all|nobody|customers?|patients?|orders|shoppers?)\b", lowered)
+    harm = re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered)
+    http_error = re.search(r"\b5\d\d\b", lowered)
+    if outage:
+        scores["urgent"] += 6
+    if http_error and impact and harm:
+        scores["urgent"] += 6
+    if re.search(r"\b(losing (?:orders|money|customers|patients))\b", lowered):
+        scores["urgent"] += 4
+    if re.search(
+        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
+        lowered,
+    ):
+        scores["urgent"] += 5
+    if re.search(r"\b(sev-?1|p0)\b", lowered):
+        scores["urgent"] += 6
+
+    if re.search(r"\b(proposal|quote|pricing|rfp|retainer|freelancer|sow|demo|spend)\b", lowered):
+        scores["lead"] += 4
+    if re.search(r"\b(hire|discovery call|set aside)\b", lowered):
+        scores["lead"] += 3
+    if re.search(r"\b(hourly|per hour|/hr|i can pay|we can pay)\b", lowered):
+        scores["lead"] += 4
+    if re.search(r"\b(budget|looking for|interested in a proposal|we'd like|we would like)\b", lowered):
+        scores["lead"] += 2
+    if re.search(r"\b(build (?:us |me )?|automatiz|見積)", lowered):
+        scores["lead"] += 2
+
+    if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
+        scores["support"] += 4
+    if re.search(r"\b(password reset|account locked|can't log ?in|cannot log ?in|won't download|blank screen)\b", lowered):
+        scores["support"] += 4
+    if re.search(r"\b(can you (?:check|look|take a look)|when you have a minute)\b", lowered):
+        scores["support"] += 2
+
+    if _VENDOR.search(lowered) or re.search(r"\b(no-?reply|noreply)\b", sender):
+        scores["lead"] -= 8
+        scores["spam"] += 3
+    if _OOO.search(email.get("subject") or "") or _OOO.search(lowered):
+        scores["lead"] -= 8
+        scores["spam"] += 4
+    auto = (email.get("auto_submitted") or "").lower()
+    if auto and auto != "no":
+        scores["lead"] -= 8
+        scores["spam"] += 4
+
+    if not (email.get("subject") or "").strip() and not html_to_text(email.get("body") or "").strip():
+        scores["spam"] += 5
+        scores["support"] -= 3
     return scores
 
 
-def choose_category(scores: dict[str, float]) -> tuple[str, float]:
-    best = max(scores.values())
+def _choose(scores: dict[str, float]) -> tuple[str, list[str], float]:
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_name, best = ranked[0]
+    second_name, second = ranked[1]
     if best <= 0:
-        return "support", 0.41
-    category = next(name for name in PRIORITY if scores[name] == best)
-    ordered = sorted(scores.values(), reverse=True)
-    margin = ordered[0] - ordered[1]
-    confidence = max(0.55, min(0.97, 0.64 + margin * 0.06))
-    return category, round(confidence, 2)
+        return "support", [], 0.45
+    # A past-due invoice that only says "urgent" stays an invoice.
+    if scores["invoice"] >= 4 and scores["invoice"] >= scores["urgent"] - 1 and best_name == "urgent":
+        best_name, best = "invoice", scores["invoice"]
+    secondary: list[str] = []
+    if scores["lead"] >= 3 and scores["support"] >= 3 and best_name in {"lead", "support"}:
+        other = "support" if best_name == "lead" else "lead"
+        secondary.append(other)
+    margin = best - second
+    confidence = max(0.55, min(0.97, 0.62 + margin * 0.05))
+    if best < 3:
+        confidence = min(confidence, 0.6)
+    return best_name, secondary, round(confidence, 2)
 
 
-def signature_lines(body: str) -> list[str]:
-    lines = [line.strip() for line in body.splitlines()]
-    for index, line in enumerate(lines):
-        if CLOSINGS.match(line):
-            return [item for item in lines[index + 1 :] if item]
-    return []
+def _name_tokens(value: str) -> list[str]:
+    cleaned = value.replace(".", " ")
+    tokens = [token for token in cleaned.split() if token.lower().strip(".") not in _HONORIFICS]
+    return tokens
 
 
 def is_person(value: str) -> bool:
-    parts = value.split()
-    if len(parts) < 2 or len(parts) > 3:
+    tokens = _name_tokens(value)
+    if len(tokens) < 2 or len(tokens) > 4:
         return False
-    for part in parts:
-        if not re.fullmatch(r"[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?", part):
+    for token in tokens:
+        if token.lower() in _ROLE:
             return False
-        if part.lower() in NOT_A_PERSON:
+        letters = [char for char in token if char.isalpha()]
+        if len(letters) < 2 or not token[0].isupper():
+            return False
+        if any(char.isdigit() for char in token):
+            return False
+        if not all(char.isalpha() or char in "-'’" for char in token):
             return False
     return True
 
 
+def _display_name(value: str) -> str:
+    return " ".join(_name_tokens(value))
+
+
+# Last-word titles that are jobs even with a department in front ("Plant Manager").
+# Counsel and partner are omitted: "Cho Counsel" is a firm, not a job.
+_TITLE_LAST = _TITLE_TAIL - {"counsel", "partner"}
+
+
 def is_title(line: str) -> bool:
-    words = re.findall(r"[A-Za-z&]+", line)
-    if not words or len(words) > 4:
+    text = line.strip().rstrip(".")
+    if _TITLE_PREFIX.search(text) or _JOB_LINE.match(text):
+        return True
+    words = re.findall(r"[^\W\d_]+", text, re.UNICODE)
+    if not words or len(words) > 6:
         return False
-    return all(word.lower() in TITLE_WORDS for word in words)
+    if len(words) <= 4 and words[-1].lower() in _TITLE_LAST:
+        return True
+    return all(word.lower() in _TITLE_WORD for word in words)
 
 
-def matches_mailbox(name: str, from_email: str) -> bool:
-    local = re.sub(r"[^a-z]", "", from_email.split("@", 1)[0].lower())
+def _department(line: str) -> bool:
+    """A mailbox or a desk, not the company that owns it."""
+    words = re.findall(r"[^\W\d_]+", line, re.UNICODE)
+    if not words:
+        return False
+    roleish = _ROLE | {"payable", "receivable", "desk"}
+    if all(word.lower() in roleish for word in words):
+        return True
+    return len(words) <= 4 and words[-1].lower() in {"accounts", "desk", "team", "department"}
+
+
+def _repeats_sender(line: str, sender: str) -> bool:
+    """Skip a sign-off that only repeats the display name (Stripe under from: Stripe)."""
+
+    def norm(value: str) -> str:
+        words = [word.lower() for word in re.findall(r"[^\W\d_]+", value or "", re.UNICODE)]
+        skip = {"inc", "llc", "ltd", "gmbh", "corp", "corporation", "limited"}
+        return "".join(word for word in words if word not in skip)
+
+    folded = norm(line)
+    return bool(folded) and folded == norm(sender)
+
+
+def _same_person(line: str, other: str) -> bool:
+    if not is_person(line) or not is_person(other):
+        return False
+    return _display_name(line).casefold() == _display_name(other).casefold()
+
+
+def _signature_lines(body: str) -> list[str]:
+    lines = [line.strip() for line in html_to_text(body).splitlines()]
+    for index, line in enumerate(lines):
+        if _CLOSINGS.match(line):
+            return [item for item in lines[index + 1 :] if item]
+    tail = [line for line in lines if line][-4:]
+    return tail
+
+
+def _matches_mailbox(name: str, from_email: str) -> bool:
+    local = re.sub(r"[^a-z]", "", (from_email or "").split("@", 1)[0].lower())
     parts = [re.sub(r"[^a-z]", "", part.lower()) for part in name.split()]
     parts = [part for part in parts if part]
-    return len(parts) >= 2 and parts[0] in local and parts[-1] in local
+    if len(parts) < 2 or not local:
+        return False
+    return parts[0] in local or parts[-1] in local
 
 
 def extract_name(email: dict) -> str | None:
-    signature = signature_lines(email.get("body") or "")
-    if signature:
-        if is_person(signature[0]):
-            return signature[0]
-        return None
+    signature = _signature_lines(email.get("body") or "")
+    for line in signature:
+        if is_title(line) or _department(line) or "。" in line or "、" in line:
+            continue
+        if is_person(line):
+            display = _display_name(line)
+            if _matches_mailbox(display, email.get("from_email") or "") or _same_person(line, email.get("from_name") or ""):
+                return display
+            break
+        break
     candidate = (email.get("from_name") or "").strip()
-    if is_person(candidate) and matches_mailbox(candidate, email.get("from_email") or ""):
-        return candidate
+    if is_person(candidate) and _matches_mailbox(_display_name(candidate), email.get("from_email") or ""):
+        return _display_name(candidate)
     return None
 
 
 def extract_company(email: dict) -> str | None:
-    signature = signature_lines(email.get("body") or "")
-    for line in signature[1:]:
+    signature = _signature_lines(email.get("body") or "")
+    seen_name = False
+    sender = email.get("from_name") or ""
+    address = email.get("from_email") or ""
+    for line in signature:
         if "@" in line or line.lower().startswith("http"):
             continue
-        digits = sum(character.isdigit() for character in line)
-        if digits >= 7:
+        if sum(character.isdigit() for character in line) >= 7:
             continue
-        # Company names often look like personal names (Brightline Dental).
-        # The person, when there is one, is the first signature line.
-        if is_title(line):
+        if is_title(line) or _department(line) or "。" in line or "、" in line:
             continue
         cleaned = line.strip().rstrip(".")
-        if cleaned:
+        if not seen_name and not is_person(cleaned) and _repeats_sender(cleaned, sender):
+            continue
+        if not _company_line(cleaned):
+            continue
+        if is_person(cleaned) and not seen_name:
+            if _matches_mailbox(_display_name(cleaned), address) or _same_person(cleaned, sender):
+                seen_name = True
+                continue
+        if not is_person(cleaned) or seen_name or not is_person(sender):
             return cleaned
     return None
 
 
-def extract_budget(text: str) -> str | None:
-    match = MONEY.search(text)
-    if match:
-        symbol = match.group("cur").upper()
-        if symbol in {"USD", "US$"}:
-            symbol = "$"
-        elif symbol == "$":
-            symbol = "$"
-        amount = int(match.group("num").replace(",", ""))
-        return f"{symbol}{amount:,}"
-    shorthand = SHORTHAND.search(text)
-    if shorthand:
-        amount = int(float(shorthand.group(1)) * 1000)
-        return f"${amount:,}"
-    return None
+def _company_line(line: str) -> bool:
+    if not line or len(line) > 60 or "?" in line or "!" in line or line.endswith(","):
+        return False
+    if line[0].islower():
+        return False
+    if re.match(r"^(hi|hey|hello|dear|this)\b", line, re.IGNORECASE):
+        return False
+    if re.search(r"\b(is|are|was|were|please|click|unsubscribe|opt out|department|service)\b", line, re.IGNORECASE):
+        return False
+    return len(line.split()) <= 6
 
 
 def extract_intent(category: str, text: str) -> str:
+    if category == "suspicious":
+        return "review a suspicious message"
     if category == "spam":
         return "unsolicited promotion"
     if category == "urgent":
-        if re.search(r"\b(down|outage|sev-?1|p0)\b", text, re.IGNORECASE):
+        if re.search(r"\b(down|outage|sev-?1|p0|5\d\d)\b", text, re.IGNORECASE):
             return "escalate an outage"
         return "meet a same-day deadline"
     if category == "invoice":
-        if re.search(r"\b(remittance|payment received|amount paid)\b", text, re.IGNORECASE):
+        if re.search(r"\b(remittance|payment received)\b", text, re.IGNORECASE):
             return "confirm remittance"
+        if _REFUND.search(text):
+            return "resolve a duplicate charge"
         return "collect a payment"
     if category == "support":
-        if re.search(
-            r"\b(can'?t|cannot) (log|sign) ?in\b|\bpassword reset\b|\baccount locked\b",
-            text,
-            re.IGNORECASE,
-        ):
+        if re.search(r"\b(password reset|account locked|can't log)\b", text, re.IGNORECASE):
             return "restore account access"
         return "resolve a product issue"
     if re.search(r"\b(discovery call|demo|meeting)\b", text, re.IGNORECASE):
@@ -302,7 +412,10 @@ def extract_intent(category: str, text: str) -> str:
     return "request a proposal"
 
 
-def draft_reply(category: str, name: str | None, intent: str) -> str:
+def draft_reply(category: str, name: str | None, intent: str, flags: list[str] | None = None) -> str:
+    if category == "suspicious":
+        listed = ", ".join(flags or ["suspicious"])
+        return f"No reply. Flagged as suspicious: {listed}."
     if category == "spam":
         return "No reply. This was filed as spam and will not be answered."
     first = name.split()[0] if name else None
@@ -322,6 +435,8 @@ def draft_reply(category: str, name: str | None, intent: str) -> str:
     if category == "invoice":
         if intent == "confirm remittance":
             action = "I will match this against the open item and confirm it is closed today."
+        elif intent == "resolve a duplicate charge":
+            action = "I will compare the two charges and reply with what should be refunded."
         else:
             action = "I will match this against the open invoice and confirm payment status today."
         return f"{hello}\n\nReceived. {action}\n\nAsad Rehman\nLane"
@@ -340,12 +455,44 @@ def draft_reply(category: str, name: str | None, intent: str) -> str:
     )
 
 
-def classify_rules(email: dict) -> Classification:
-    text = message_text(email)
-    category, confidence = choose_category(score_categories(text))
-    name = extract_name(email)
-    company = extract_company(email)
-    budget = extract_budget(text)
+def _suppress_budget(email: dict, text: str) -> bool:
+    sender = (email.get("from_email") or "").lower()
+    if re.search(r"\b(no-?reply|noreply)\b", sender):
+        return True
+    if _VENDOR.search(text) or _OOO.search(email.get("subject") or "") or _OOO.search(text):
+        return True
+    if _COLD.search(text):
+        return True
+    return False
+
+
+def classify_rules(email: dict, known_contacts: list[dict] | None = None) -> Classification:
+    prepared = unwrap_forward(email)
+    text = strip_injection_notes(_plain(prepared))
+    flags = assess_risk(prepared, _plain(prepared), known_contacts)
+    blocking = hard_flags(flags)
+    if blocking:
+        return Classification(
+            category="suspicious",
+            confidence=0.9,
+            name=extract_name(prepared),
+            company=extract_company(prepared),
+            budget=None,
+            intent="review a suspicious message",
+            draft_reply=draft_reply("suspicious", None, "", blocking),
+            model="rules",
+            risk_flags=flags,
+            forwarded_by=prepared.get("forwarded_by"),
+            contact_email=prepared.get("from_email"),
+        )
+    category, secondary, confidence = _choose(_score(text, prepared))
+    name = extract_name(prepared)
+    company = extract_company(prepared)
+    auto = (prepared.get("auto_submitted") or "").lower()
+    if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
+        name = None
+        company = None
+    budget = None if _suppress_budget(prepared, text) else extract_budget(text)
     intent = extract_intent(category, text)
     return Classification(
         category=category,
@@ -356,34 +503,58 @@ def classify_rules(email: dict) -> Classification:
         intent=intent,
         draft_reply=draft_reply(category, name, intent),
         model="rules",
+        risk_flags=flags,
+        secondary_categories=secondary,
+        forwarded_by=prepared.get("forwarded_by"),
+        contact_email=prepared.get("from_email"),
     )
 
 
 def classification_from_payload(payload: dict, model: str) -> Classification:
-    category = str(payload.get("category", "")).strip().lower()
+    """Validate an object. Non-objects and unknown categories raise ValueError."""
+    if not isinstance(payload, dict):
+        raise ValueError("Model JSON was not an object")
+    category = payload.get("category")
+    if not isinstance(category, str):
+        raise ValueError("category must be a string")
+    category = category.strip().lower()
     if category not in CATEGORIES:
         raise ValueError(f"Unknown category: {category!r}")
     try:
         confidence = float(payload.get("confidence", 0.5))
     except (TypeError, ValueError) as exc:
         raise ValueError("confidence must be a number") from exc
-    confidence = max(0.0, min(1.0, confidence))
+    if not 0 <= confidence <= 1:
+        raise ValueError("confidence out of range")
 
-    def clean(value: object) -> str | None:
+    def clean(value: object, limit: int) -> str | None:
         if value is None:
             return None
-        text = str(value).strip()
-        return text or None
+        if not isinstance(value, str):
+            raise ValueError("field must be a string or null")
+        text = value.strip()
+        if not text:
+            return None
+        if len(text) > limit:
+            raise ValueError("field is too long")
+        return text
 
-    name = clean(payload.get("name"))
-    intent = clean(payload.get("intent")) or "review the message"
-    reply = clean(payload.get("draft_reply")) or draft_reply(category, name, intent)
+    name = clean(payload.get("name"), 120)
+    company = clean(payload.get("company"), 160)
+    raw_budget = clean(payload.get("budget"), 80)
+    budget = extract_budget(raw_budget) if raw_budget else None
+    if raw_budget and budget is None:
+        budget = raw_budget
+    intent = clean(payload.get("intent"), 80) or "review the message"
+    reply = clean(payload.get("draft_reply"), 2000) or draft_reply(category, name, intent)
+    if re.search(r"\b(i have sent|i've sent|already booked|i have already)\b", reply, re.IGNORECASE):
+        raise ValueError("draft claims an action was already taken")
     return Classification(
         category=category,
         confidence=round(confidence, 2),
         name=name,
-        company=clean(payload.get("company")),
-        budget=clean(payload.get("budget")),
+        company=company,
+        budget=budget,
         intent=intent,
         draft_reply=reply,
         model=model,
