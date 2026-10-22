@@ -12,7 +12,8 @@ import httpx
 
 from app.llm import KEY_QUOTA_NOTICE, KEY_REJECTED_NOTICE
 
-SECRET_DIR_SKIP = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist"}
+SECRET_DIR_SKIP = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist", "artifacts", "docs"}
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _response(status: int, payload: dict, url: str) -> httpx.Response:
@@ -129,9 +130,11 @@ def test_a_visitor_key_never_persists(client, monkeypatch, caplog, tmp_path):
     assert secret not in caplog.text
     database = b"".join(path.read_bytes() for path in tmp_path.iterdir() if path.is_file())
     assert secret.encode() not in database
-    leaked = _files_with(secret, Path("/workspace"))
+    leaked = _files_with(secret, ROOT)
     assert leaked == []
-    desk = Path("/workspace/dashboard/src/components/session-key.tsx").read_text()
+    leaked_tmp = _files_with(secret, tmp_path)
+    assert leaked_tmp == []
+    desk = (ROOT / "dashboard/src/components/session-key.tsx").read_text()
     assert "localStorage" not in desk
     assert "sessionStorage" not in desk
 

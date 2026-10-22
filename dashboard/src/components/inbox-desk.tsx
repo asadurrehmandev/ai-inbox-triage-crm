@@ -48,11 +48,16 @@ const MORE_FILTERS = [
 
 type FilterId = (typeof MAIN_FILTERS)[number]["id"] | (typeof MORE_FILTERS)[number]["id"];
 
+function isUrgent(item: Triage) {
+  return item.category === "urgent" || (item.secondary_categories || []).includes("urgent");
+}
+
 function matches(item: Triage, filter: FilterId) {
   if (filter === "approval") {
     return !item.approved && !["spam", "suspicious", "review"].includes(item.category);
   }
   if (filter === "all" || filter === "waiting") return true;
+  if (filter === "urgent") return isUrgent(item);
   return item.category === filter;
 }
 
@@ -91,6 +96,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
     const next: Record<string, number> = { waiting: desk.pending.length, all: desk.items.length };
     for (const item of desk.items) {
       next[item.category] = (next[item.category] ?? 0) + 1;
+      if (isUrgent(item)) next.urgent = (next.urgent ?? 0) + (item.category === "urgent" ? 0 : 1);
       if (!item.approved && !["spam", "suspicious", "review"].includes(item.category)) {
         next.approval = (next.approval ?? 0) + 1;
       }
@@ -256,7 +262,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
 
   const list = (
     <section className="flex h-full min-h-0 flex-col bg-surface" aria-label="Inbox list">
-      <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-2">
+      <div className="flex flex-nowrap items-center gap-1 overflow-x-auto border-b border-border px-2 py-2">
         <Tabs value={MAIN_FILTERS.some((item) => item.id === filter) ? filter : ""} onValueChange={(value) => setFilter(value as FilterId)}>
           <TabsList aria-label="Filters">
             {MAIN_FILTERS.map((option) => (
@@ -269,7 +275,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
         </Tabs>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button type="button" variant={MORE_FILTERS.some((item) => item.id === filter) ? "secondary" : "ghost"} size="sm">
+            <Button type="button" variant={MORE_FILTERS.some((item) => item.id === filter) ? "secondary" : "ghost"} size="sm" className="shrink-0">
               {MORE_FILTERS.find((item) => item.id === filter)?.label ?? "More"}
             </Button>
           </DropdownMenuTrigger>
@@ -350,7 +356,7 @@ export function InboxDesk({ focusId }: { focusId?: number }) {
                     type="button"
                     onClick={() => openItem(item.id)}
                     className={cn(
-                      "flex w-full gap-2 border-b border-border px-3 py-2 text-left",
+                      "flex w-full gap-2 border-b border-border px-3 py-2 text-left max-md:min-h-11",
                       active ? "bg-primary-soft shadow-[inset_2px_0_0_0_var(--primary)]" : "hover:bg-muted",
                     )}
                     aria-current={active ? "true" : undefined}

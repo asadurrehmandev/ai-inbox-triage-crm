@@ -85,12 +85,17 @@ def test_unknown_senders_do_not_jump_the_queue_or_reach_the_crm(tmp_path, monkey
             "END:VCALENDAR\n"
         ),
     }
-    for email in (image, cousin, invite):
+    for email in (image, invite):
         result = classify_rules(email)
         outcome = _run(email)
         assert result.category != "urgent", email["id"]
         assert outcome["lead"] is None, email["id"]
-    assert classify_rules(cousin).category != "suspicious"
+    cousin_result = classify_rules(cousin)
+    cousin_outcome = _run(cousin)
+    assert cousin_result.category == "urgent"
+    assert "unverified sender" in cousin_result.reasons
+    assert cousin_outcome["lead"] is None
+    assert cousin_result.category != "suspicious"
     assert classify_rules(image).category != "suspicious"
 
 

@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useImperativeHandle, useRef, useState, type RefObject } from "react";
+import { MoreHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -113,13 +120,18 @@ export function ApprovalCard({
     !item.approved &&
     !confirm &&
     Boolean(onAccept) &&
-    ["lead", "urgent", "invoice", "review"].includes(item.category);
+    (item.category === "lead" || (item.category === "review" && item.suggested_category === "lead"));
   const canPrimary = !busy && !item.approved;
 
   useEffect(() => {
     if (item.edited) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let tick = 0;
     const think = window.setTimeout(() => {
+      if (reduce) {
+        setStream({ id: item.id, saved: item.draft_reply, text: item.draft_reply, thinking: false });
+        return;
+      }
       setStream({ id: item.id, saved: item.draft_reply, text: "", thinking: false });
       let cursor = 0;
       tick = window.setInterval(() => {
@@ -132,7 +144,7 @@ export function ApprovalCard({
         });
         if (cursor >= item.draft_reply.length) window.clearInterval(tick);
       }, 16);
-    }, 420);
+    }, reduce ? 0 : 420);
     return () => {
       window.clearTimeout(think);
       window.clearInterval(tick);
@@ -166,9 +178,15 @@ export function ApprovalCard({
       return;
     }
     setConfirmState(null);
+    if (result.ok && category === "lead") {
+      const approved = await onApprove();
+      if (!approved) return;
+      toast.success("Filed to CRM (mock).");
+      onDone?.();
+      return;
+    }
     if (result.ok) {
-      if (category === "lead") toast.success("Filed to CRM (mock).");
-      else toast.success(category === "support" ? "Marked as support." : "Label accepted.");
+      toast.success(category === "support" ? "Marked as support." : "Label accepted.");
       onDone?.();
     } else if (result.message) {
       setNote(result.message);
@@ -255,10 +273,12 @@ export function ApprovalCard({
         <h2 className="mt-3 text-lg font-semibold tracking-[-0.01em]" data-testid="reading-subject">
           {item.subject || "No subject"}
         </h2>
-        <p className="mt-1 truncate text-sm text-muted-foreground" title={`${item.from_name || ""} ${item.from_email || ""}`}>
-          {item.from_name || "Unknown sender"}
-          {item.from_email ? ` <${item.from_email}>` : ""}
-          {item.received_at ? ` · ${formatWhen(item.received_at)}` : ""}
+        <p className="mt-1 text-sm text-muted-foreground" title={`${item.from_name || ""} ${item.from_email || ""}`}>
+          <span className="break-words">
+            {item.from_name || "Unknown sender"}
+            {item.from_email ? ` <${item.from_email}>` : ""}
+          </span>
+          {item.received_at ? <span className="whitespace-nowrap"> · {formatWhen(item.received_at)}</span> : null}
         </p>
         {item.llm_error ? (
           <p className="mt-2 text-sm text-muted-foreground">Rules fallback: {item.llm_error}</p>
@@ -290,7 +310,7 @@ export function ApprovalCard({
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 md:px-5">
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 pb-6 md:px-5">
         <div className="max-w-[72ch] text-base leading-[22px] whitespace-pre-wrap">{item.body}</div>
         <div className="mt-6 flex items-baseline justify-between gap-3">
           <h3 className="text-xs font-medium text-muted-foreground">
@@ -326,67 +346,56 @@ export function ApprovalCard({
         {note ? <p className="mt-2 text-sm text-muted-foreground">{note}</p> : null}
       </div>
 
-      <footer className="flex flex-wrap items-center gap-2 border-t border-border px-4 py-3 md:px-5">
+      <footer className="flex shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-t border-border px-4 py-2 md:px-5">
         {canPrimary ? (
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button type="button" size="lg" className="max-sm:w-full" onClick={primary} data-testid="primary-action">
+              <Button type="button" size="lg" className="shrink-0" onClick={primary} data-testid="primary-action">
                 {primaryLabel}
               </Button>
             </TooltipTrigger>
             <TooltipContent>{primaryLabel} (⌘↵ or E)</TooltipContent>
           </Tooltip>
         ) : null}
-        {onLive ? (
-          <Button type="button" variant="outline" disabled={busy || item.approved} onClick={() => void onLive()}>
-            Classify with live AI
-          </Button>
-        ) : null}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button type="button" variant="outline" onClick={edit}>
+            <Button type="button" variant="outline" className="shrink-0" onClick={edit}>
               Edit draft
             </Button>
           </TooltipTrigger>
           <TooltipContent>Edit draft (R)</TooltipContent>
         </Tooltip>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={!dirty || busy}
-          onClick={async () => {
-            await onSave(draft);
-            setNote("Draft saved.");
-            toast.success("Draft saved.");
-          }}
-        >
-          Save edits
-        </Button>
-        {(canFile || reviewLead) && !confirm ? (
-          <Button type="button" variant="outline" disabled={!canPrimary} onClick={() => void doApprove()}>
-            Approve reply
-          </Button>
-        ) : null}
-        {canNotLead ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="outline" disabled={busy} onClick={notLead}>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="icon" className="shrink-0" aria-label="More actions">
+              <MoreHorizontal className="size-4" strokeWidth={1.75} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              disabled={!dirty || busy}
+              onSelect={() => {
+                void onSave(draft).then(() => {
+                  setNote("Draft saved.");
+                  toast.success("Draft saved.");
+                });
+              }}
+            >
+              Save edits
+            </DropdownMenuItem>
+            {canNotLead ? (
+              <DropdownMenuItem disabled={busy} onSelect={notLead}>
                 Mark not a lead
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Mark not a lead (N). Files nothing. The label becomes support.</TooltipContent>
-          </Tooltip>
-        ) : null}
-        {onSnooze ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button type="button" variant="outline" onClick={onSnooze}>
-                Snooze
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Snooze for this session (H)</TooltipContent>
-          </Tooltip>
-        ) : null}
+              </DropdownMenuItem>
+            ) : null}
+            {onSnooze ? <DropdownMenuItem onSelect={onSnooze}>Snooze</DropdownMenuItem> : null}
+            {onLive ? (
+              <DropdownMenuItem disabled={busy || item.approved} onSelect={() => void onLive()}>
+                Classify with live AI
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </footer>
     </article>
   );

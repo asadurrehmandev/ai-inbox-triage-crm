@@ -33,8 +33,8 @@ export function AlertFeed() {
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end">
-              Leads, urgent mail, support, and invoices are posted. Spam stays quiet. Set SLACK_WEBHOOK_URL and the
-              same text goes to a real channel.
+              Urgent mail, suspicious mail, and leads that were filed are posted. Routine mail stays quiet. Set
+              SLACK_WEBHOOK_URL and the same text goes to a real channel.
             </PopoverContent>
           </Popover>
         </div>

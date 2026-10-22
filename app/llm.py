@@ -476,9 +476,13 @@ def classify_live(email: dict, known_contacts: list[dict] | None = None) -> tupl
     return apply_model_guard(result, bounded, ruled, known_contacts), _usage(body)
 
 
-def classify_email(email: dict, known_contacts: list[dict] | None = None) -> Classification:
+def classify_email(
+    email: dict,
+    known_contacts: list[dict] | None = None,
+    domain_contacts: list[dict] | None = None,
+) -> Classification:
     bounded = _bounded_email(email)
-    ruled = classify_rules(bounded, known_contacts)
+    ruled = classify_rules(bounded, known_contacts, domain_contacts)
     if ruled.category == "suspicious":
         return ruled
     provider = select_provider()

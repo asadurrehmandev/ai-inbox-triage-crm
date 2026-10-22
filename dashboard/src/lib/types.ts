@@ -40,6 +40,7 @@ export type Triage = {
   llm_error?: string | null;
   suggested_category?: string | null;
   suggestion_confidence?: number | null;
+  secondary_categories?: string[];
   reasons?: string[];
 };
 

@@ -11,7 +11,7 @@ function Tabs(props: React.ComponentProps<typeof TabsPrimitive.Root>) {
 function TabsList({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.List>) {
   return (
     <TabsPrimitive.List
-      className={cn("flex flex-wrap items-center gap-1", className)}
+      className={cn("flex flex-nowrap items-center gap-1", className)}
       {...props}
     />
   );

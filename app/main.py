@@ -30,6 +30,21 @@ from app.seed import reset_demo, seed_if_empty
 from app.worker import run_once, start_worker, status as worker_status, stop_worker
 
 logger = logging.getLogger("lane")
+
+
+class _RedactQuery(logging.Filter):
+    """Drop query strings from the access log. Keys belong in X-Lane-Key, not the URL."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn's access formatter unpacks a 5-tuple. Edit the path in place.
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) and "?" in args[2]:
+            path, _query = args[2].split("?", 1)
+            record.args = (*args[:2], f"{path}?redacted", *args[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactQuery())
 BODY_LIMIT = 256 * 1024
 
 MINUTES_PER_EMAIL = 6
@@ -499,6 +514,25 @@ def edit_draft(triage_id: int, payload: DraftIn) -> dict:
 
 @app.post("/api/triage/{triage_id}/approve")
 def approve_reply(triage_id: int) -> dict:
+    row = db.get_triage(triage_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+    if row["approved"]:
+        raise HTTPException(status_code=409, detail="already approved")
+    # Approving a lead files it. A confirm or a block does not lock the reply.
+    if (row.get("category") or "") == "lead":
+        try:
+            accept_suggestion(row, "lead", confirmed=False)
+        except FilingConfirm as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "confirm", "message": exc.message, "reasons": exc.reasons},
+            ) from exc
+        except FilingBlocked as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": exc.message, "reasons": exc.reasons},
+            ) from exc
     try:
         row = db.approve(triage_id)
     except AlreadyApproved as exc:

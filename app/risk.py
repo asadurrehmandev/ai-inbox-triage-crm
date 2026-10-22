@@ -98,9 +98,28 @@ _ASSISTANT = re.compile(
     r"auto-send|update the crm|set (?:my |the )?budget)",
     re.IGNORECASE,
 )
+# An order aimed at the assistant. A buyer who wants "an AI assistant" and
+# names a budget is a lead, not an instruction.
 _ADDRESSED = re.compile(
-    r"\b(assistant|ai assistant|language model)\b.{0,160}\b(crm|budget|qualified|classify|ignore|category)\b",
+    r"\b(?:ai |the )?(?:assistant|language model)\b\s*[:,]\s*.{0,200}?\b"
+    r"(?:ignore|disregard|classify|override|mark|set|update|approve|file|skip|auto-send)\b",
     re.IGNORECASE | re.DOTALL,
+)
+_OVERRIDE = re.compile(
+    r"\b(?:ignore|disregard|override|bypass)\b[^.\n]{0,60}\b"
+    r"(?:rules|instructions|policy|guidelines|previous|prior|safeguards)\b",
+    re.IGNORECASE,
+)
+_BANK_VERIFY = re.compile(
+    r"\b(?:please\s+)?(?:verify|confirm|validate|update)\b[^.\n]{0,48}\b(?:your\s+)?"
+    r"(?:bank(?:ing)?(?:\s+account)?|payout(?:\s+account)?|payment\s+method)\b"
+    r"|\b(?:payment|payout|funds)\b[^.\n]{0,40}\b(?:on hold|suspended|locked)\b"
+    r"[^.\n]{0,80}\b(?:verify|confirm|release|http)\b",
+    re.IGNORECASE,
+)
+_SQUAT_LABEL = re.compile(
+    r"payments?|payouts?|billing|invoices?|secure-?login|verify",
+    re.IGNORECASE,
 )
 _MACHINE = re.compile(r"\b[a-z][a-z0-9_]{2,}\s*=\s*[^\s;,]{1,40}", re.IGNORECASE)
 _SYSTEM_LINE = re.compile(r"(?m)^\s*system\s*:", re.IGNORECASE)
@@ -478,12 +497,54 @@ def _machine_payload(text: str) -> bool:
 def _assistant_instruction(text: str) -> bool:
     if _ASSISTANT.search(text or ""):
         return True
+    if _OVERRIDE.search(text or ""):
+        return True
     if _ADDRESSED.search(text or ""):
         return True
     return _machine_payload(text or "")
 
 
+def _registrable_label(domain: str) -> str:
+    parts = [part for part in (domain or "").lower().strip(".").split(".") if part]
+    if len(parts) >= 3 and parts[-2] in {"co", "com", "org", "net", "ac"} and len(parts[-1]) == 2:
+        return parts[-3]
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0] if parts else ""
+
+
+def known_contact_lookalike(domain: str, known_contacts: list[dict] | None) -> bool:
+    """A domain one edit from a contact already in this mailbox, not a brand list."""
+    label = fold(_registrable_label(domain)).translate(_LEET)
+    if len(label) < 8 or not known_contacts:
+        return False
+    own = (domain or "").lower().strip(".")
+    for contact in known_contacts:
+        other_domain = _domain(contact.get("email") or "")
+        if not other_domain or other_domain == own:
+            continue
+        other = fold(_registrable_label(other_domain)).translate(_LEET)
+        if len(other) < 8 or other == label or abs(len(other) - len(label)) > 1:
+            continue
+        if _edit_distance(label, other) <= 1:
+            return True
+    return False
+
+
+def _squat_host(host: str) -> bool:
+    """payments.example or brand-payments.example, and not a real brand domain."""
+    domain = (host or "").lower().strip(".")
+    if not domain or "." not in domain:
+        return False
+    for suffixes in _BRANDS.values():
+        if _legit(domain, suffixes):
+            return False
+    return bool(_SQUAT_LABEL.search(_registrable_label(domain)))
+
+
 def _credential_request(text: str, sender: str) -> bool:
+    if _BANK_VERIFY.search(text or "") and (_urls(text or "") or _squat_host(_domain(sender))):
+        return True
     if _SECRET_REPLY.search(text or ""):
         return True
     if _DANGEROUS_FILE.search(text or "") and (_credential_ask(text or "") or re.search(r"\bapprove the\b", text or "", re.I)):
@@ -693,7 +754,16 @@ def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict
     combined = fold(f"{email.get('subject') or ''}\n{text}\n{hidden}")
     sender = email.get("from_email") or ""
     raw_hosts = [host.lower().split(":")[0] for host in _URL.findall(body)]
+    sender_domain = _domain(sender)
+    hosts = [sender_domain, *raw_hosts]
     if lookalike_domain(sender) or any(lookalike_domain(host) for host in raw_hosts):
+        flags.append("lookalike_domain")
+    elif any(known_contact_lookalike(host, known_contacts) for host in hosts if host) and (
+        _WIRE_REQUEST.search(combined)
+        or _BANK_VERIFY.search(combined)
+        or _credential_ask(combined)
+        or re.search(r"\b(?:wire|transfer)\b", combined, re.IGNORECASE)
+    ):
         flags.append("lookalike_domain")
     if display_name_mismatch(email, known_contacts):
         flags.append("display_name_mismatch")

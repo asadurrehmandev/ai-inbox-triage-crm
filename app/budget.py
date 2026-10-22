@@ -63,6 +63,8 @@ _RANGE = re.compile(
 )
 _HOURLY = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})\s*/\s*hr\b", re.IGNORECASE)
 _YEN_MAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万円")
+_YEN_MARK = re.compile(r"(?:¥|￥)\s*(?P<num>\d[\d,]*)|(?P<num2>\d[\d,]*)\s*円")
+_YUAN = re.compile(r"(?P<num>\d[\d,]*)\s*元|(?:RMB|CNY)\s*(?P<num2>\d[\d,]*)")
 _GRAND = re.compile(r"(?<![A-Za-z])(?P<num>\d+(?:\.\d+)?)\s*grand\b", re.IGNORECASE)
 _PREFIX = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})(?!\s*k\b)", re.IGNORECASE)
 _SUFFIX = re.compile(rf"(?P<num>{_NUM})\s?(?P<cur>USD|EUR|GBP|€|£|\$)", re.IGNORECASE)
@@ -194,6 +196,15 @@ def extract_budget(text: str) -> str | None:
     mxn = _MXN.search(text)
     if mxn:
         return _fmt("MXN", parse_number(mxn.group("num") or mxn.group("num2")))
+    yen_mark = _YEN_MARK.search(text)
+    if yen_mark:
+        return _fmt("¥", parse_number(yen_mark.group("num") or yen_mark.group("num2")))
+    yuan = _YUAN.search(text)
+    if yuan:
+        amount = parse_number(yuan.group("num") or yuan.group("num2"))
+        if abs(amount - round(amount)) < 0.001:
+            return f"{int(round(amount)):,}元"
+        return f"{amount:,.2f}元"
     thousand = _THOUSAND.search(text)
     if thousand:
         return _fmt("$", float(thousand.group("a")) * 1000)

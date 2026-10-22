@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app import alerts, crm, db
 from app.classifier import Classification
+from app.db import AlreadyApproved
 from app.llm import classify_email
 from app.gate import evaluate_filing, is_receipt_or_invoice, log_confirmed_filing
 from app.normalize import open_channels
@@ -45,7 +46,8 @@ def push_lead(email: dict, result: Classification) -> dict:
     )
 
 
-def notify(email: dict, result: Classification) -> dict:
+def notify(email: dict, result: Classification) -> dict | None:
+    """Alert only when someone has to act: phishing, an outage, or a filed lead."""
     if hard_flags(result.risk_flags) or result.category == "suspicious":
         return alerts.post_alert(
             "suspicious",
@@ -53,14 +55,9 @@ def notify(email: dict, result: Classification) -> dict:
             title="Possible phishing — do not pay or reply",
             body=result.draft_reply,
         )
-    if result.category == "review":
-        return alerts.post_alert(
-            "review",
-            record_from_email(email, result),
-            title="Needs review",
-            body=result.draft_reply,
-        )
-    return alerts.post_alert(result.category, record_from_email(email, result))
+    if result.category == "urgent":
+        return alerts.post_alert("urgent", record_from_email(email, result), body=result.draft_reply)
+    return None
 
 
 def readable_text(email: dict) -> str:
@@ -74,11 +71,24 @@ def _rules_mode(result: Classification) -> bool:
 
 
 def _known_contacts() -> list[dict]:
+    """People already in the CRM. The filing gate uses this list and no one else."""
     return [
-        {"name": row.get("name"), "email": row.get("email")}
+        {"name": row.get("name"), "email": (row.get("email") or "").strip().lower()}
         for row in db.list_leads()
         if row.get("email")
     ]
+
+
+def _domain_contacts() -> list[dict]:
+    """Every sender in the mailbox, so a lookalike of a real contact can be seen."""
+    found: dict[str, dict] = {}
+    for row in _known_contacts():
+        found[row["email"]] = row
+    for row in db.list_emails():
+        email = (row.get("from_email") or "").strip().lower()
+        if email and email not in found:
+            found[email] = {"name": row.get("from_name"), "email": email}
+    return list(found.values())
 
 
 def apply_policy(email: dict, result: Classification, known_contacts: list[dict] | None = None) -> dict:
@@ -131,7 +141,9 @@ def apply_policy(email: dict, result: Classification, known_contacts: list[dict]
         )
         if filed.allow and not hard_flags(result.risk_flags):
             lead = push_lead(email, result)
-    if result.category != "spam":
+    if lead is not None:
+        alert = alerts.post_alert("lead", record_from_email(email, result), body=result.draft_reply)
+    elif result.category in {"suspicious", "urgent"}:
         alert = notify(email, result)
     db.set_status(email["id"], "triaged")
     return {"triage": db.public_triage({**triage, **_email_fields(email)}), "lead": lead, "alert": alert}
@@ -152,6 +164,8 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
     target = category or row.get("suggested_category")
     if target not in {"lead", "support", "invoice", "spam", "urgent", "suspicious"}:
         raise ValueError("no suggested label")
+    if row.get("approved") and target != "lead":
+        raise AlreadyApproved(row["id"])
     email = {
         "id": row["email_id"],
         "from_email": row.get("from_email"),
@@ -175,7 +189,12 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
     if decision.code == "confirmed":
         log_confirmed_filing(str(row.get("email_id") or ""), decision.reasons)
     confidence = float(row.get("suggestion_confidence") or 0.7)
-    updated = db.accept_category(row["id"], target, confidence)
+    if row.get("approved"):
+        # The reply is already locked. Filing a lead that was approved first
+        # is still allowed, so the row is not stuck.
+        updated = db.get_triage(row["id"])
+    else:
+        updated = db.accept_category(row["id"], target, confidence)
     if updated is None:
         raise KeyError(row["id"])
     lead = None
@@ -190,18 +209,24 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
             draft_reply=row.get("draft_reply") or "",
             contact_email=row.get("from_email"),
         )
-        lead = push_lead(email, result)
+        existing = {item.get("email_id") for item in db.list_leads()}
+        if email["id"] not in existing:
+            lead = push_lead(email, result)
+            alerts.post_alert(
+                "lead",
+                record_from_email(email, result),
+                title="Filed to CRM",
+                body=result.draft_reply,
+            )
+        else:
+            lead = next(item for item in db.list_leads() if item.get("email_id") == email["id"])
     return {"triage": db.public_triage(updated, full_body=True), "lead": lead}
 
 
 def process_email(email: dict) -> dict:
-    contacts = [
-        {"name": row.get("name"), "email": row.get("email")}
-        for row in db.list_leads()
-        if row.get("name") and row.get("email")
-    ]
-    result = classify_email(email, contacts)
-    return apply_policy(email, result)
+    contacts = _known_contacts()
+    result = classify_email(email, contacts, _domain_contacts())
+    return apply_policy(email, result, contacts)
 
 
 def process_pending() -> list[dict]:

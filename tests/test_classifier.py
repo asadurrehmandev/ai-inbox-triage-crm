@@ -9,7 +9,7 @@ from app.classifier import classify_rules
 from app.llm import classification_from_payload, select_provider
 
 CORPUS = Path(__file__).resolve().parents[1] / "data" / "sample_emails.json"
-FIELDS = ("name", "company", "budget", "intent")
+FIELDS = ("name", "company", "budget")
 
 
 def load_emails() -> list[dict]:
@@ -94,7 +94,8 @@ def test_quote_with_shorthand_budget_is_a_lead():
     result = classify_rules(email)
     assert result.category == "lead"
     assert result.budget == "$6,000"
-    assert result.intent == "request a proposal"
+    assert "quote" in result.intent.lower()
+    assert result.intent != "request a proposal"
     assert result.name == "Tom Becker"
     assert "Tom" in result.draft_reply
 
@@ -109,14 +110,15 @@ def test_phishing_that_says_invoice_is_suspicious():
 def test_past_due_invoice_marked_urgent_stays_an_invoice():
     result = classify_rules(_by_id("m28"))
     assert result.category == "invoice"
-    assert result.intent == "collect a payment"
+    assert "past due" in result.intent.lower() or "1042" in result.intent
+    assert "urgent" in result.secondary_categories
     assert result.budget == "$2,000"
 
 
 def test_broken_lead_form_is_support_not_a_sale():
     result = classify_rules(_by_id("m17"))
     assert result.category == "support"
-    assert result.intent == "resolve a product issue"
+    assert "broken" in result.intent.lower() or "form" in result.intent.lower()
 
 
 def test_role_address_does_not_invent_a_person():

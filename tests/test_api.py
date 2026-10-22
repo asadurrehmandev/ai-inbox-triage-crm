@@ -348,13 +348,15 @@ def test_slack_text_is_escaped_and_failures_are_recorded(client, monkeypatch):
 
     title, body = render_alert(
         "lead",
-        {"name": "A & B <script>", "company": "Co", "budget": "$1", "intent": "hire", "subject": "Hi"},
+        {"name": "A & B <script>", "company": "Keller & Gray", "budget": "$1", "intent": "hire", "subject": "Hi"},
     )
-    assert "&amp;" in body
-    assert "&lt;" in body
-    assert "<script>" not in body
+    assert "&amp;" not in body
+    assert "Keller & Gray" in body
+    assert "<script>" in body
+    sent: list[dict] = []
 
     def fail(url, json=None, timeout=None):
+        sent.append(json or {})
         request = httpx.Request("POST", url)
         return httpx.Response(500, json={"ok": False}, request=request)
 
@@ -363,9 +365,17 @@ def test_slack_text_is_escaped_and_failures_are_recorded(client, monkeypatch):
     stored = post_alert("lead", {"email_id": "m01", "name": "Jane", "subject": "Hi"})
     assert stored["delivered"] is False
     assert stored["delivery_error"] == "HTTP 500"
-    titled = post_alert("lead", {"email_id": "m01", "name": "Jane"}, title="<!channel> wire now")
-    assert "<!channel>" not in titled["title"]
-    assert "&lt;!channel&gt;" in titled["title"]
+    titled = post_alert(
+        "lead",
+        {"email_id": "m01", "name": "Jane", "company": "Keller & Gray"},
+        title="<!channel> wire now",
+    )
+    assert "<!channel>" in titled["title"]
+    assert "&amp;" not in titled["body"]
+    assert "Keller & Gray" in titled["body"]
+    assert "&lt;!channel&gt;" in sent[-1]["text"]
+    assert "&amp;" in sent[-1]["text"]
+    assert "&amp;amp;" not in sent[-1]["text"]
 
 
 def test_triage_rejects_a_bad_category_and_an_approved_overwrite(client):

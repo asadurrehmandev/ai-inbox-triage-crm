@@ -37,14 +37,18 @@ def test_phishing_and_injection_are_suspicious_and_not_filed(tmp_path, monkeypat
 
 
 def test_urgent_needs_a_known_sender_or_a_thread():
-    # A first contact is not urgent, even when the outage or the deadline is real.
-    for email_id in ("q14", "q15", "q19", "q27"):
+    # A real outage is urgent from a first-time sender, and says so.
+    for email_id in ("q14", "q15", "q19"):
         result = classify_rules(_mail(email_id))
-        assert result.category != "urgent", email_id
-        assert result.suggested_category == "urgent", email_id
+        assert result.category == "urgent", email_id
+        assert "unverified sender" in result.reasons
+    # A same-day deadline with no outage still waits for a known sender or a thread.
+    deadline = classify_rules(_mail("q27"))
+    assert deadline.category != "urgent"
+    assert deadline.suggested_category == "urgent"
     hidden = classify_rules(_mail("q19"))
     assert "instruction_suppression" in hidden.risk_flags
-    assert hidden.category != "urgent"
+    assert hidden.category == "urgent"
     # The same outage is urgent once the sender is already known, and the
     # suppression note still does not hide it.
     known = classify_rules(_mail("q19"), [{"name": "Hannah Weiss", "email": "hannah@weissdental.com"}])

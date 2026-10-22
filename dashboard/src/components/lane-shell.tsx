@@ -71,34 +71,41 @@ export function LaneShell({ children }: { children: ReactNode }) {
         <Sidebar stats={stats} pathname={pathname} />
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-2 md:h-[52px] md:flex-nowrap md:px-4 md:py-0">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="md:hidden"
-            aria-label="Open navigation"
-            onClick={() => setNavPath(pathname)}
-          >
-            <Menu className="size-4" strokeWidth={1.75} />
-          </Button>
-          <h1 className="truncate text-md font-semibold tracking-[-0.01em]">{title}</h1>
-          <div className="ml-auto flex items-center gap-2 max-md:w-full max-md:flex-wrap">
-            {lastRun ? (
-              <span className="hidden text-xs text-subtle-foreground tabular-nums lg:inline">
-                Last run {formatWhen(lastRun)}
-              </span>
-            ) : null}
+        <header className="shrink-0 border-b border-border">
+          <div className="flex h-11 items-center gap-2 px-2 md:h-[52px] md:px-4">
             <Button
               type="button"
-              variant={onInbox ? "outline" : "default"}
-              onClick={() => void desk.runIntake()}
-              disabled={desk.busy || desk.pending.length === 0}
+              variant="ghost"
+              size="icon"
+              className="md:hidden"
+              aria-label="Open navigation"
+              onClick={() => setNavPath(pathname)}
             >
-              {desk.busy ? "Working" : "Run worker"}
+              <Menu className="size-4" strokeWidth={1.75} />
             </Button>
+            <h1 className="min-w-0 flex-1 truncate text-md font-semibold tracking-[-0.01em]">{title}</h1>
+            <div className="flex shrink-0 items-center gap-1 md:gap-2">
+              {lastRun ? (
+                <span className="hidden text-xs text-subtle-foreground tabular-nums lg:inline">
+                  Last run {formatWhen(lastRun)}
+                </span>
+              ) : null}
+              <Button
+                type="button"
+                variant={onInbox ? "outline" : "default"}
+                onClick={() => void desk.runIntake()}
+                disabled={desk.busy || desk.pending.length === 0}
+              >
+                {desk.busy ? "Working" : "Run worker"}
+              </Button>
+              <span className="hidden md:contents">
+                <DemoBadge stats={stats} onOpenKey={() => setKeyOpen(true)} />
+              </span>
+              <ThemeToggle />
+            </div>
+          </div>
+          <div className="px-2 pb-2 md:hidden">
             <DemoBadge stats={stats} onOpenKey={() => setKeyOpen(true)} />
-            <ThemeToggle />
           </div>
         </header>
         {session.notice ? (

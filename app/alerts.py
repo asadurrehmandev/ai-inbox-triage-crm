@@ -14,11 +14,11 @@ def escape_mrkdwn(value: str) -> str:
 
 
 def render_alert(category: str, record: dict) -> tuple[str, str]:
-    name = escape_mrkdwn(str(record.get("name") or record.get("from_name") or "Unknown sender"))
-    company = escape_mrkdwn(str(record.get("company") or "no company on file"))
-    budget = escape_mrkdwn(str(record.get("budget") or "no amount stated"))
-    intent = escape_mrkdwn(str(record.get("intent") or "review the message"))
-    subject = escape_mrkdwn(str(record.get("subject") or record.get("source_subject") or ""))
+    name = str(record.get("name") or record.get("from_name") or "Unknown sender")
+    company = str(record.get("company") or "no company on file")
+    budget = str(record.get("budget") or "no amount stated")
+    intent = str(record.get("intent") or "review the message")
+    subject = str(record.get("subject") or record.get("source_subject") or "")
     if category == "lead":
         title = "Qualified lead"
         body = f"{name} at {company}. {budget}. {intent}. {subject}".strip()
@@ -45,8 +45,10 @@ def render_alert(category: str, record: dict) -> tuple[str, str]:
 
 def post_alert(category: str, record: dict, title: str | None = None, body: str | None = None) -> dict:
     rendered_title, rendered_body = render_alert(category, record)
-    title = escape_mrkdwn(title) if title else rendered_title
-    body = escape_mrkdwn(body) if body else rendered_body
+    # The desk stores plain text. Slack is the only place that needs escapes,
+    # and escaping twice is how "&amp;amp;" shows up in the feed.
+    title = title or rendered_title
+    body = body or rendered_body
     stored = db.insert_alert(
         {
             "email_id": record.get("email_id"),
@@ -58,7 +60,11 @@ def post_alert(category: str, record: dict, title: str | None = None, body: str 
     webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
     if webhook:
         try:
-            response = httpx.post(webhook, json={"text": f"*{escape_mrkdwn(title)}*\n{body}"}, timeout=10)
+            response = httpx.post(
+                webhook,
+                json={"text": f"*{escape_mrkdwn(title)}*\n{escape_mrkdwn(body)}"},
+                timeout=10,
+            )
             stored["delivered"] = response.is_success
             if not response.is_success:
                 stored["delivery_error"] = f"HTTP {response.status_code}"
