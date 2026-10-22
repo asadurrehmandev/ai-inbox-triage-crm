@@ -12,7 +12,7 @@ from app.dkim_verify import verified_dkim_domains
 from app.gate import authentication, sender_authenticated
 from app.mailbox import parse_message
 from app.pipeline import apply_policy
-from app.risk import payment_related
+from app.risk import invoice_address_notice, payment_related
 from tests.conftest import signed_body
 from tests.test_filing_gate import _accept, _crm_ids, _park
 
@@ -35,10 +35,13 @@ def test_invoice_destinations_are_phone_blocked_and_an_added_cc_is_not():
     assert payment_related("Our new billing email is ledger@fieldnote.test.") is True
     assert payment_related("Please update the AP contact to ledger@fieldnote.test.") is True
     assert payment_related("Please use remit@vendor.test for invoice delivery.") is True
-    assert payment_related("Please remit the monthly statements to ledger@fieldnote.test.") is True
     assert payment_related("Redirect accounts-payable correspondence to nova@vendor.test.") is True
-    assert payment_related("Mail every supplier bill to payables@vendor.test.") is True
     assert payment_related("Please send payouts to the new address on file.") is True
+    assert payment_related("Please remit the monthly statements to ledger@fieldnote.test.") is False
+    assert invoice_address_notice("Please remit the monthly statements to ledger@fieldnote.test.") is True
+    assert payment_related("Mail every supplier bill to payables@vendor.test.") is False
+    assert payment_related("Our AP address is ap@harbor.test.") is False
+    assert invoice_address_notice("Our AP address is ap@harbor.test.") is True
     assert payment_related("please also cc our AP") is False
     assert payment_related("Please also CC ap@harbor.test on the next invoice.") is False
     assert (
@@ -62,6 +65,19 @@ def test_invoice_destinations_are_phone_blocked_and_an_added_cc_is_not():
         is False
     )
     assert payment_related("Please send the invoices to the client when the import is done.") is False
+    assert payment_related("Pay this invoice to IBAN GB82 WEST 1234 5698 7654 32.") is True
+    assert payment_related("Code GB82WEST12345698765499 is only a reference.") is False
+    assert payment_related("SWIFT NWBKGB2L") is True
+    assert payment_related("Routing 021000021 and account 12345678.") is True
+    assert payment_related("Sort code 20-00-00, account 12345678.") is True
+    assert payment_related("Please route the payment to the account named in the attached letter.") is True
+    assert payment_related("Our bank changed in September.") is True
+    assert payment_related("We moved to a different institution.") is True
+    assert payment_related("Payments now go to the factoring partner.") is True
+    assert payment_related("Nuestro banco cambió el mes pasado.") is True
+    assert payment_related("Notre banque a changé.") is True
+    assert payment_related("The payout is on its way to your bank account ending 4242.") is False
+    assert payment_related("Please also cc our AP. There is no change to the bank details.") is False
 
 
 def test_unauthenticated_same_domain_link_needs_confirm_and_aligned_dkim_does_not(client, monkeypatch):
@@ -694,3 +710,102 @@ def test_added_ap_copy_stays_confirm_when_the_note_mentions_invoices(client):
     second = _accept(client, copied["id"], confirm=True)
     assert second.status_code == 200
     assert "auth-cc-invoices" in _crm_ids(client)
+
+
+def test_a_new_client_ap_address_can_be_confirmed_and_a_reassurance_stays_soft(client):
+    address = _park(
+        {
+            "id": "auth-ap-address",
+            "from_name": "Priya Shah",
+            "from_email": "priya@northpeak.test",
+            "subject": "the portal",
+            "body": (
+                "Hi Asad,\n\nWe'd like the portal. Budget is $25,000. "
+                "Our AP address is ap@northpeak.test.\n\nPriya Shah\n"
+            ),
+        }
+    )
+    first = _accept(client, address["id"])
+    assert first.status_code == 409
+    assert first.json()["detail"]["code"] == "confirm"
+    assert "where invoices are sent" in first.json()["detail"]["reasons"]
+    assert "auth-ap-address" not in _crm_ids(client)
+    second = _accept(client, address["id"], confirm=True)
+    assert second.status_code == 200
+    assert "auth-ap-address" in _crm_ids(client)
+
+    copied = _park(
+        {
+            "id": "auth-cc-unchanged",
+            "from_name": "Lina Cho",
+            "from_email": "lina@fieldnotegoods.test",
+            "subject": "brochure",
+            "body": (
+                "Hi Asad,\n\nBudget is $2,000 for the brochure. "
+                "Please also cc our AP. There is no change to the bank details.\n\nLina Cho\n"
+            ),
+        }
+    )
+    notice = _accept(client, copied["id"])
+    assert notice.status_code == 409
+    assert notice.json()["detail"]["code"] == "confirm"
+    assert "also copy accounts payable" in notice.json()["detail"]["reasons"]
+    assert _accept(client, copied["id"], confirm=True).status_code == 200
+
+
+def test_auth_results_outrank_arc_and_junk_ids_are_ignored(monkeypatch):
+    monkeypatch.setenv("TRUSTED_AUTHSERV_ID", "mx.lane.test")
+    arc_first = {
+        "ARC-Authentication-Results": "i=1; mx.lane.test; dkim=pass header.d=harborline.test",
+        "Authentication-Results": "mx.lane.test; dkim=fail header.d=harborline.test",
+    }
+    report = authentication({"from_email": "pat@harborline.test", "headers": arc_first})
+    assert report["dkim"] == "none"
+    assert report["aligned"] is False
+    original = authentication(
+        {
+            "from_email": "pat@harborline.test",
+            "headers": {
+                "Authentication-Results-Original": "mx.lane.test; dkim=pass header.d=harborline.test",
+            },
+        }
+    )
+    assert original["aligned"] is False
+    for blob in (
+        "mx.lane.test\u200bevil; dkim=pass header.d=harborline.test",
+        "mx.lane.test (comment); dkim=pass header.d=harborline.test",
+    ):
+        junk = authentication(
+            {
+                "from_email": "pat@harborline.test",
+                "headers": {"Authentication-Results": blob},
+            }
+        )
+        assert junk["aligned"] is False
+
+
+def test_a_later_passing_dkim_signature_can_align(monkeypatch):
+    class _Verifier:
+        def __init__(self, raw, timeout=5):
+            self.headers = [(b"dkim-signature", b"one"), (b"dkim-signature", b"two")]
+            self.domain = None
+
+        def verify(self, index=0):
+            if index == 0:
+                self.domain = b"esp.example"
+                return False
+            if index == 1:
+                self.domain = b"fieldnote.test"
+                return True
+            return False
+
+    import dkim
+
+    monkeypatch.setattr(dkim, "DKIM", _Verifier)
+    assert verified_dkim_domains(b"From: ada@fieldnote.test\r\n\r\nHi\r\n") == ["fieldnote.test"]
+    message = {
+        "from_email": "ada@fieldnote.test",
+        "raw_message": b"From: ada@fieldnote.test\r\n\r\nHi\r\n",
+        "headers": {"Authentication-Results": "evil.attacker; dkim=pass header.d=fieldnote.test"},
+    }
+    assert sender_authenticated(message) is True

@@ -368,6 +368,25 @@ def create_triage(payload: TriageIn) -> dict:
     existing = db.get_triage_by_email(payload.email_id)
     if existing and existing["approved"]:
         raise HTTPException(status_code=409, detail="already approved")
+    if existing and (existing.get("category") or "").strip().lower() == "suspicious":
+        if payload.category != "suspicious":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "suspicious",
+                    "message": "blocked: a suspicious message cannot be filed as a lead",
+                    "reasons": ["category is suspicious"],
+                },
+            )
+    if payload.category == "lead" and payment_related_message(email):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "payment",
+                "message": "payment-related: verify by phone",
+                "reasons": ["payment-related: verify by phone"],
+            },
+        )
     stored = save_classification(email, _classification(payload))
     return db.public_triage(
         {**stored, "subject": email["subject"], "mailbox_name": email["from_name"], "from_email": email["from_email"], "body": email["body"], "received_at": email["received_at"]},
@@ -454,25 +473,34 @@ def accept_label(triage_id: int, payload: AcceptIn | None = None) -> dict:
     return outcome["triage"]
 
 
+def payment_related_message(email: dict) -> bool:
+    from app.gate import _readable
+    from app.risk import payment_related
+
+    return payment_related(_readable(email))
+
+
 @app.post("/api/crm/leads")
 def create_lead(payload: LeadIn) -> dict:
+    """Every CRM write is a lead write, and the filing gate runs on the message."""
     email = db.get_email(payload.email_id)
-    if email is not None and payload.category == "lead":
-        stored_triage = db.get_triage_by_email(payload.email_id)
-        current = (stored_triage or {}).get("category") or "lead"
-        try:
-            evaluate_filing(
-                email,
-                current_category=current,
-                target="lead",
-                known_contacts=None,
-                confirmed=False,
-            ).raise_if_refused()
-        except FilingBlocked as exc:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": exc.code, "message": exc.message, "reasons": exc.reasons},
-            ) from exc
+    if email is None:
+        raise HTTPException(status_code=404, detail=f"No message {payload.email_id}")
+    stored_triage = db.get_triage_by_email(payload.email_id)
+    current = (stored_triage or {}).get("category") or "lead"
+    try:
+        evaluate_filing(
+            email,
+            current_category=current,
+            target="lead",
+            known_contacts=None,
+            confirmed=False,
+        ).raise_if_refused()
+    except FilingBlocked as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": exc.message, "reasons": exc.reasons},
+        ) from exc
     result = Classification(
         category=payload.category,
         confidence=1,
@@ -483,31 +511,15 @@ def create_lead(payload: LeadIn) -> dict:
         draft_reply="",
         model="rules",
     )
-    if email:
-        result.name = payload.name
-        stored = push_lead(
-            {
-                "id": payload.email_id,
-                "from_email": payload.from_email or email.get("from_email"),
-                "subject": payload.subject or email.get("subject"),
-            },
-            result,
-        )
-    else:
-        stored = crm.store_lead(
-            {
-                "email_id": payload.email_id,
-                "name": payload.name,
-                "company": payload.company,
-                "email": payload.from_email,
-                "budget": payload.budget,
-                "intent": payload.intent,
-                "category": payload.category,
-                "source_subject": payload.subject,
-                "status": "Reply pending",
-            }
-        )
-    return stored
+    result.name = payload.name
+    return push_lead(
+        {
+            "id": payload.email_id,
+            "from_email": payload.from_email or email.get("from_email"),
+            "subject": payload.subject or email.get("subject"),
+        },
+        result,
+    )
 
 
 @app.get("/api/crm/leads")

@@ -23,7 +23,7 @@ from app.dkim_verify import verified_dkim_domains
 from app.classifier import known_sender
 from app.normalize import open_channels
 from app.prepare import strip_quotes
-from app.risk import assess_risk, hard_flags, payment_related
+from app.risk import assess_risk, hard_flags, invoice_address_notice, payment_related
 
 log = logging.getLogger("lane.gate")
 
@@ -91,16 +91,14 @@ _HEADER_I = re.compile(r"\bheader\.i\s*=\s*([^\s;]+)", re.IGNORECASE)
 _SPF = re.compile(r"\bspf\s*=\s*(pass|fail|softfail|neutral|none)\b", re.IGNORECASE)
 _DMARC = re.compile(r"\bdmarc\s*=\s*(pass|fail|none)\b", re.IGNORECASE)
 _MSG_ID = re.compile(r"<([^<>\s]+)>")
-_AUTH_HEADERS = {
-    "authentication-results",
-    "arc-authentication-results",
-    "authentication-results-original",
-}
-# RFC 8601 authserv-id, after an optional ARC instance prefix (i=1;).
-_AUTHSERV_ID = re.compile(
-    r"^(?:i\s*=\s*\d+\s*;\s*)?([A-Za-z0-9._-]+)",
+_ZW = re.compile("[\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+# authserv-id, then an optional integer version, then the semicolon.
+# A comment or a zero-width character means the header is not trusted.
+_AUTHSERV_FIELD = re.compile(
+    r"^([A-Za-z0-9._-]+)(?:\s+\d+)?\s*;",
     re.IGNORECASE,
 )
+_ARC_INSTANCE = re.compile(r"^i\s*=\s*\d+\s*;\s*", re.IGNORECASE)
 
 
 class FilingBlocked(Exception):
@@ -186,13 +184,32 @@ def trusted_authserv_ids() -> set[str]:
 
 
 def _authserv_id(blob: str) -> str:
-    match = _AUTHSERV_ID.match((blob or "").strip())
-    return match.group(1).lower().strip(".") if match else ""
+    """The authserv-id, or empty when the field is not a plain token.
+
+    Zero-width characters and comments are rejected. The id is not taken as
+    a prefix of a longer token.
+    """
+    text = (blob or "").strip()
+    text = _ARC_INSTANCE.sub("", text, count=1)
+    field = text.split(";", 1)[0]
+    if _ZW.search(field) or "(" in field or ")" in field:
+        return ""
+    match = _AUTHSERV_FIELD.match(text)
+    if match is None:
+        return ""
+    return match.group(1).lower().strip(".")
 
 
 def _auth_blobs(email: dict) -> list[str]:
-    """Auth headers in stored order. The first item is the topmost header."""
-    return [value for name, value in _header_pairs(email) if name in _AUTH_HEADERS]
+    """Authentication-Results first, then ARC, whatever the JSON key order.
+
+    Authentication-Results-Original is a forwarder copy and is not included.
+    Within each header, list order is topmost first.
+    """
+    pairs = _header_pairs(email)
+    primary = [value for name, value in pairs if name == "authentication-results"]
+    arc = [value for name, value in pairs if name == "arc-authentication-results"]
+    return primary + arc
 
 
 def trusted_auth_blob(email: dict) -> str:
@@ -496,6 +513,8 @@ def always_confirm_features(email: dict) -> list[str]:
         reasons.append("changed terms")
     if _CC_AP.search(readable) and not payment_related(readable):
         reasons.append("also copy accounts payable")
+    if invoice_address_notice(readable) and not payment_related(readable):
+        reasons.append("where invoices are sent")
     return _dedupe(reasons)
 
 

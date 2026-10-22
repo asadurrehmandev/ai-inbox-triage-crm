@@ -1,9 +1,10 @@
-"""Check a DKIM signature on the raw RFC822 message.
+"""Check DKIM signatures on the raw RFC822 message.
 
 The webhook JSON path has no raw message, so this returns None there and the
 filing gate uses TRUSTED_AUTHSERV_ID instead. When dkimpy is installed and
-the bytes are present, a passing signature is the only DKIM result that counts.
-A header claiming dkim=pass cannot satisfy this check.
+the bytes are present, every signature is checked. One passing signature whose
+domain aligns with From is enough. A header claiming dkim=pass cannot satisfy
+this check.
 """
 
 from __future__ import annotations
@@ -11,6 +12,13 @@ from __future__ import annotations
 import logging
 
 log = logging.getLogger("lane.dkim")
+
+
+def _domain(verifier) -> str:
+    domain = getattr(verifier, "domain", None)
+    if isinstance(domain, bytes):
+        domain = domain.decode("ascii", "replace")
+    return (domain or "").strip().lower().strip(".")
 
 
 def verified_dkim_domains(raw: bytes) -> list[str] | None:
@@ -28,14 +36,26 @@ def verified_dkim_domains(raw: bytes) -> list[str] | None:
         return None
     try:
         verifier = dkim.DKIM(raw, timeout=5)
-        passed = bool(verifier.verify())
     except Exception:
         log.warning("dkim_verify_failed", exc_info=True)
         return []
-    if not passed:
+    signatures = [
+        pair
+        for pair in getattr(verifier, "headers", []) or []
+        if pair and isinstance(pair[0], bytes) and pair[0].lower() == b"dkim-signature"
+    ]
+    if not signatures:
         return []
-    domain = getattr(verifier, "domain", None)
-    if isinstance(domain, bytes):
-        domain = domain.decode("ascii", "replace")
-    host = (domain or "").strip().lower().strip(".")
-    return [host] if host else []
+    found: list[str] = []
+    for index in range(len(signatures)):
+        try:
+            passed = bool(verifier.verify(index))
+        except Exception:
+            log.warning("dkim_verify_failed index=%s", index, exc_info=True)
+            continue
+        if not passed:
+            continue
+        host = _domain(verifier)
+        if host and host not in found:
+            found.append(host)
+    return found

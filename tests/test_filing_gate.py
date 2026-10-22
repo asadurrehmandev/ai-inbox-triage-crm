@@ -59,6 +59,100 @@ def test_store_cards_and_claim_codes_are_money_movement():
     assert payment_related("please also cc our AP") is False
 
 
+def test_crm_write_and_relabel_cannot_skip_the_gate(client):
+    suspicious = _park(
+        {
+            "id": "gate-side-suspicious",
+            "from_name": "Nora Pell",
+            "from_email": "nora@pellstudio.test",
+            "subject": "website refresh",
+            "body": "Hi Asad,\n\nCould we talk about a website refresh next month?\n\nNora Pell\n",
+        },
+        category="suspicious",
+        flags=[],
+    )
+    vendor = client.post(
+        "/api/crm/leads",
+        json={
+            "email_id": "gate-side-suspicious",
+            "name": "Nora Pell",
+            "from_email": "nora@pellstudio.test",
+            "category": "vendor",
+            "intent": "request a proposal",
+        },
+    )
+    assert vendor.status_code == 409
+    assert vendor.json()["detail"]["code"] == "suspicious"
+    assert "gate-side-suspicious" not in _crm_ids(client)
+    relabel = client.post(
+        "/api/triage",
+        json={
+            "email_id": "gate-side-suspicious",
+            "category": "lead",
+            "confidence": 0.9,
+            "intent": "request a proposal",
+            "draft_reply": "Thanks for writing.",
+        },
+    )
+    assert relabel.status_code == 409
+    assert relabel.json()["detail"]["code"] == "suspicious"
+    kept = db.get_triage(suspicious["id"])
+    assert kept["category"] == "suspicious"
+    still = _accept(client, suspicious["id"], confirm=True)
+    assert still.status_code == 409
+    assert still.json()["detail"]["code"] == "suspicious"
+    assert "gate-side-suspicious" not in _crm_ids(client)
+
+    payment = _park(
+        {
+            "id": "gate-side-payment",
+            "from_name": "Lina Cho",
+            "from_email": "lina@fieldnotegoods.test",
+            "subject": "banking",
+            "body": "Hi Asad,\n\nOur bank changed in September.\n\nLina Cho\n",
+        },
+        category="review",
+    )
+    labeled = client.post(
+        "/api/triage",
+        json={
+            "email_id": "gate-side-payment",
+            "category": "lead",
+            "confidence": 0.9,
+            "intent": "request a proposal",
+            "draft_reply": "Thanks for writing.",
+        },
+    )
+    assert labeled.status_code == 409
+    assert labeled.json()["detail"]["code"] == "payment"
+    assert db.get_triage(payment["id"])["category"] == "review"
+    filed = client.post(
+        "/api/crm/leads",
+        json={
+            "email_id": "gate-side-payment",
+            "name": "Lina Cho",
+            "from_email": "lina@fieldnotegoods.test",
+            "category": "invoice",
+            "intent": "record an invoice",
+        },
+    )
+    assert filed.status_code == 409
+    assert filed.json()["detail"]["code"] == "payment"
+    assert "gate-side-payment" not in _crm_ids(client)
+    missing = client.post(
+        "/api/crm/leads",
+        json={
+            "email_id": "gate-no-such-message",
+            "name": "Pat Shore",
+            "from_email": "pat@harborline.test",
+            "category": "vendor",
+            "intent": "request a proposal",
+        },
+    )
+    assert missing.status_code == 404
+    assert "gate-no-such-message" not in _crm_ids(client)
+
+
 def test_accept_cannot_promote_suspicious_even_when_flags_are_empty(client):
     row = _park(
         {

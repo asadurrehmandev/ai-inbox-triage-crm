@@ -133,7 +133,7 @@ _PAYMENT_INVARIANT = re.compile(
     r"wallets?|crypto(?:currency)?|usdt|tether|bitcoin|btc|ethereum|"
     r"payees?|beneficiar(?:y|ies)|gift\s*cards?|store\s+cards?|claim[-\s]?codes?|"
     r"(?:app\s*store|itunes|google\s*play|play\s*store)\s+(?:gift\s*)?(?:cards?|codes?)|"
-    r"routing\s+numbers?|account\s+numbers?|bank\s+accounts?|"
+    r"routing\s+numbers?|account\s+numbers?|"
     r"card\s+numbers?|credit\s+cards?|debit\s+cards?|"
     r"update\s+our\s+details|pay(?:able)?\s+to|remit\s+to"
     r")\b",
@@ -184,6 +184,68 @@ _NEW_PAYABLE_ACCOUNT = re.compile(
     r"new\s+(?:payee|details)|"
     r"new\s+(?:bank\s+)?accounts?(?!\s+(?:manager|executive|team|director|owner|rep|plan|plans|payable)))\b",
     re.IGNORECASE,
+)
+# A bank or institution move, in either order, including the same shape in
+# Spanish and French. "no change" is removed before this runs.
+_BANK_NOUN = (
+    r"(?:banks?|banking|institutions?|banco|banque|bancos|"
+    r"bancaires?|bancari[oa]s?|entidad(?:es)?|instituci[oó]n(?:es)?|"
+    r"coordonn[ée]es|rib)"
+)
+_BANK_VERB = (
+    r"(?:chang(?:e|ed|es|ing|é|ée|ées|ement|ements)?|"
+    r"mov(?:e|ed|es|ing)|migrat(?:e|ed|es|ing|ion)|switch(?:ed|es|ing)?|"
+    r"cambi(?:o|ó|amos|ado|aron|ar|a|é)|modifi(?:é|ée|ées|er)|"
+    r"replac(?:e|ed|es|ing)|updat(?:e|ed|es|ing))"
+)
+_BANK_MOVE = re.compile(
+    rf"\b{_BANK_VERB}\b.{{0,40}}\b{_BANK_NOUN}\b|\b{_BANK_NOUN}\b.{{0,40}}\b{_BANK_VERB}\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_PAYMENTS_NOW = re.compile(
+    r"\b(?:payments?|funds|wires?|money|pagos?|fonds|virements?)\b.{0,40}"
+    r"\b(?:now|no longer|ahora|ya no|maintenant|d[ée]sormais)\b.{0,40}"
+    r"\b(?:go|goes|going|sent|send|paid|pay|van|vont|ir[aá]n?)\b"
+    r"|"
+    r"\b(?:now|no longer|ahora|ya no|maintenant|d[ée]sormais)\b.{0,30}"
+    r"\b(?:go|goes|going|sent|van|vont)\b.{0,40}"
+    r"\b(?:account|bank|factor|institution|partner|cuenta|compte)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRIOR_STATE = re.compile(
+    r"\b(?:instead|no longer|previously|previous|former|moved|migrat\w+|replac\w+|"
+    r"chang\w+|updated|update|revised|different|switch\w*|from now on|going forward|"
+    r"redirect(?:ed|ing)?|re-?rout\w+)\b"
+    r"|\bnew\s+(?:billing|remittance|payment|invoice|bank|account|address|e-?mail)\b",
+    re.IGNORECASE,
+)
+_AP_ADDRESS = re.compile(
+    r"\b(?:ap|a/p|accounts[\s-]+payable|billing)\s+(?:e-?mail|address)\s+is\b",
+    re.IGNORECASE,
+)
+# A reassurance that nothing moved. It must not itself become the bank-change hit.
+_REASSURANCE = re.compile(
+    r"[^.!\n]*\b(?:no|not|without|n't)\b[^.!\n]{0,48}\bchang\w+\b[^.!\n]*"
+    r"|[^.!\n]*\bunchanged\b[^.!\n]*"
+    r"|[^.!\n]*\b(?:remain|stays?|stay)\s+the\s+same\b[^.!\n]*",
+    re.IGNORECASE,
+)
+_ENCLOSED_ACCOUNT = re.compile(
+    r"\b(?:route|send|direct|pay|forward)\b.{0,50}\b(?:payments?|funds|money|wires?)\b"
+    r".{0,60}\baccounts?\b.{0,40}\b(?:attach\w*|enclos\w*|letter|note)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_IBAN_CANDIDATE = re.compile(
+    r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b",
+    re.IGNORECASE,
+)
+_BIC_LABELED = re.compile(
+    r"\b(?:bic|swift)\b[^A-Za-z0-9]{0,16}([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b",
+    re.IGNORECASE,
+)
+_SORT_AND_ACCOUNT = re.compile(
+    r"\b(\d{2}-\d{2}-\d{2})\b.{0,40}\b(\d{8})\b|\b(\d{8})\b.{0,40}\b(\d{2}-\d{2}-\d{2})\b",
+    re.DOTALL,
 )
 
 
@@ -415,45 +477,125 @@ def _strip_additive_cc(text: str) -> str:
     return _ADDITIVE_CC.sub(" ", text or "")
 
 
-def _destination_change(text: str) -> bool:
-    """A request to change where money or payable documents are sent.
+def _without_reassurance(text: str) -> str:
+    """Drop a clause that says the bank details did not change."""
+    return _REASSURANCE.sub(" ", text or "")
 
-    The request routes a payable document (invoice, receipt, payment,
-    statement, bill, remittance, disbursement, payout, or AP correspondence)
-    to an address, or it replaces the billing mailbox. Asking to also CC
-    accounts payable is not this request.
+
+def _iban_valid(token: str) -> bool:
+    compact = re.sub(r"\s+", "", token).upper()
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}", compact):
+        return False
+    if not 15 <= len(compact) <= 34:
+        return False
+    moved = compact[4:] + compact[:4]
+    digits = "".join(str(int(char, 36)) for char in moved)
+    return int(digits) % 97 == 1
+
+
+def _aba_valid(nine: str) -> bool:
+    if not re.fullmatch(r"\d{9}", nine) or nine == "000000000":
+        return False
+    weights = (3, 7, 1, 3, 7, 1, 3, 7, 1)
+    total = sum(int(digit) * weight for digit, weight in zip(nine, weights))
+    return total % 10 == 0
+
+
+def _routing_and_account(text: str) -> bool:
+    """A 9-digit ABA routing number beside a separate account number."""
+    digits = [(match.group(0), match.start(), match.end()) for match in re.finditer(r"\d{9}", text)]
+    accounts = [
+        (match.start(), match.end())
+        for match in re.finditer(r"\d{6,17}", text)
+        if len(match.group(0)) != 9
+    ]
+    for number, start, end in digits:
+        if not _aba_valid(number):
+            continue
+        for account_start, account_end in accounts:
+            if account_end <= start or account_start >= end:
+                if min(abs(account_start - end), abs(start - account_end)) <= 80:
+                    return True
+    return False
+
+
+def _account_shapes(text: str) -> bool:
+    """A real IBAN, a labeled BIC, a US routing-and-account pair, or a UK sort code and account."""
+    upper = text.upper()
+    if any(_iban_valid(match.group(0)) for match in _IBAN_CANDIDATE.finditer(upper)):
+        return True
+    if _BIC_LABELED.search(upper):
+        return True
+    if _routing_and_account(text):
+        return True
+    return bool(_SORT_AND_ACCOUNT.search(text))
+
+
+def _payable_destination(text: str) -> bool:
+    return bool(_DESTINATION_ROUTE.search(text) or _AP_ADDRESS.search(text))
+
+
+def _destination_change(text: str) -> bool:
+    """A change of an existing payee or invoice destination.
+
+    Naming where a new client wants invoices sent, with no prior account to
+    replace, is not this. A replaced billing mailbox, an updated AP contact,
+    or a route that says instead, new, or no longer, is.
     """
-    stripped = _strip_additive_cc(text or "")
-    return bool(_DESTINATION_ROUTE.search(stripped) or _BILLING_MAILBOX.search(stripped))
+    stripped = _without_reassurance(_strip_additive_cc(text or ""))
+    if _BILLING_MAILBOX.search(stripped):
+        return True
+    for match in _DESTINATION_ROUTE.finditer(stripped):
+        window = stripped[max(0, match.start() - 80) : match.end() + 80]
+        if _PRIOR_STATE.search(window):
+            return True
+    return False
+
+
+def invoice_address_notice(text: str) -> bool:
+    """A first statement of where invoices go. A person can confirm it."""
+    folded = fold(text or "")
+    stripped = _without_reassurance(_strip_additive_cc(folded))
+    if _destination_change(folded):
+        return False
+    return _payable_destination(stripped)
+
+
+def _bank_change(text: str) -> bool:
+    cleaned = _without_reassurance(text or "")
+    return bool(_BANK_MOVE.search(cleaned) or _PAYMENTS_NOW.search(cleaned))
 
 
 def payment_related(text: str) -> bool:
-    """True when the text is about moving money or changing where it goes.
+    """True when the text moves money or changes where an existing payment goes.
 
-    Wallets, crypto, payees, beneficiaries, account and routing numbers, cards,
-    gift cards, store cards, claim codes, and a new pay-to all match. So does
-    any request to send invoices, receipts, payments, statements, or bills to
-    a different address. Asking to also CC accounts payable does not, even
-    when the note also mentions invoices or a new account manager. A product
-    description that only says IBAN or SWIFT does not. Naming an app store
-    without a card or a code does not match. A payout preference that names
-    no rail, payee, or account does not match.
+    A valid IBAN, a labeled BIC or SWIFT code, a US account with an ABA routing
+    number, or a UK sort code with an account number matches. So does a bank
+    or institution change, including the same shape in Spanish or French, and
+    a request to send a payment to the account in an attached letter. A new
+    client's AP address, with nothing being replaced, does not. A payout notice
+    that only names the bank account it is already going to does not. Asking
+    to also CC accounts payable does not, even when the note says the bank
+    details are unchanged. The words IBAN or SWIFT, with no real code, do not.
     """
     folded = fold(text or "")
-    if _destination_change(folded):
+    cleaned = _without_reassurance(_strip_additive_cc(folded))
+    if _account_shapes(folded) or _ENCLOSED_ACCOUNT.search(folded):
         return True
-    if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(folded):
+    if _destination_change(folded) or _bank_change(folded):
+        return True
+    if _PAYMENT_INVARIANT.search(folded) or _PAYEE_SHIFT.search(cleaned):
         return True
     if re.search(
         r"\b(?:invoices?|receipts?|payments?|statements?|bills?)\b",
         folded,
         re.IGNORECASE,
-    ) and _NEW_PAYABLE_ACCOUNT.search(folded):
+    ) and _NEW_PAYABLE_ACCOUNT.search(cleaned):
         return True
     return bool(
-        _payment_change(folded)
+        _payment_change(cleaned)
         or _WIRE_REQUEST.search(folded)
-        or _RAIL_CHANGE.search(folded)
+        or _RAIL_CHANGE.search(cleaned)
         or _GIFT.search(folded)
     )
 
