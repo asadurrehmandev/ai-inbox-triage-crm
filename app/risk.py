@@ -1127,14 +1127,32 @@ def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict
     return flags
 
 
+# A repeated display name is a confirm reason unless money or credentials are present.
+_DISPLAY_NAME_HARDENED_BY = {
+    "payment_request",
+    "payment_lure",
+    "payment_change",
+    "payment_related",
+    "credential_request",
+    "deceptive_link",
+    "gift_card",
+    "lookalike_domain",
+}
+
+
 def hard_flags(flags: list[str]) -> list[str]:
     """Flags that force the suspicious label.
 
     A note that only says "do not alert" is recorded and ignored, so a real
     outage cannot hide behind it. payment_related is a filing block and a
-    banner, not a claim that the message is phishing.
+    banner, not a claim that the message is phishing. A repeated display name
+    is not a hard flag on its own. It stays hard when money or credentials
+    are also flagged.
     """
     soft = {"instruction_suppression", "payment_related"}
+    present = set(flags)
+    if "display_name_mismatch" in present and not (present & _DISPLAY_NAME_HARDENED_BY):
+        soft.add("display_name_mismatch")
     return [flag for flag in flags if flag not in soft]
 
 

@@ -22,7 +22,7 @@ from app.classifier import Classification
 from app.llm import DEMO_LIMIT_NOTICE, classify_email, classify_for_visitor, select_provider
 from app.mailbox import mailbox_mode
 from app.gate import FilingBlocked, FilingConfirm, evaluate_filing
-from app.pipeline import accept_suggestion, push_lead, save_classification
+from app.pipeline import _known_contacts, accept_suggestion, push_lead, save_classification
 from app.replay import apply_recording, recording_status
 from app.db import AlreadyApproved, DraftLocked
 from app.llm import anthropic_model
@@ -614,7 +614,7 @@ def create_lead(payload: LeadIn) -> dict:
             email,
             current_category=current,
             target="lead",
-            known_contacts=None,
+            known_contacts=_known_contacts(),
             confirmed=False,
         ).raise_if_refused()
     except FilingBlocked as exc:

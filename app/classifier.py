@@ -333,6 +333,50 @@ def _same_day_deadline(text: str) -> bool:
     return bool(_DEADLINE_WHEN.search(text or "") and _DEADLINE_WHAT.search(text or ""))
 
 
+# Service-down language. A calm support note, however long, is not this.
+_OUTAGE_CLAIM = re.compile(
+    r"\b(?:outage|offline|unreachable|sev-?1)\b"
+    r"|\b(?:is|are|went|goes|going)\s+down\b"
+    r"|\bnot taking orders\b"
+    r"|\bcannot take (?:bookings|orders|a single sale)\b"
+    r"|\bnobody can book\b"
+    r"|\bguests cannot reserve\b"
+    r"|\bserver error\b"
+    r"|\b502s?\b"
+    r"|\bleft the queue\b"
+    r"|\bwhole shop is stuck\b"
+    r"|\bca[ií]d[oa]\b"
+    r"|\bno abre para nadie\b"
+    r"|\bno podemos recibir\b"
+    r"|\bstopped answering\b"
+    r"|\bhors service\b"
+    r"|\bblank (?:white )?page\b"
+    r"|\bfor everyone\b"
+    r"|\bevery single\b"
+    r"|\bthousands of customers\b"
+    r"|\bnothing is (?:printing|shipping)\b"
+    r"|\bto the wrong\b"
+    r"|\bantwortet nicht\b"
+    r"|\bniemand kann\b",
+    re.IGNORECASE,
+)
+# A clock, not a long paragraph. "before noon" on a personal login is not this.
+_OPERATIONAL_WHEN = re.compile(
+    r"\b(?:within the hour|in (?:\d+|one|two|three|four|five|six) hours?|end of (?:the )?day|"
+    r"by \d{1,2}(?::\d{2})?\s?(?:am|pm))\b",
+    re.IGNORECASE,
+)
+
+
+def _outage_claim(text: str) -> bool:
+    return bool(_OUTAGE_CLAIM.search(text or ""))
+
+
+def _operational_deadline(text: str) -> bool:
+    """An operational deadline. The length of the body does not create one."""
+    return bool(_same_day_deadline(text) or _OPERATIONAL_WHEN.search(text or ""))
+
+
 def _identity_tokens(email: dict | None) -> list[str]:
     """Sender-name tokens, and a product token that only hides an urgency stem."""
     if not email:
@@ -537,9 +581,11 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     # The embedding head fills a gap. A clear rule score is left alone.
     guessed = None
     signals = signals or {}
-    # Urgency is the learned head. A same-day legal or operational deadline is
-    # a closed class, so it still counts when the wording is not an outage.
-    # A picture with no words, or a calendar invite, is not an outage note.
+    # Urgency is the learned head. It does not override a calm support note
+    # unless the note claims an outage or names an operational deadline.
+    # A long body can raise the head on one sentence. That does not count
+    # without the claim or the deadline. A same-day legal deadline still counts
+    # when the wording is not an outage. A picture or a calendar is not one.
     # The subject alone must not carry the urgent score.
     negated = signals.get("negated", 0) >= negation_threshold()
     if negated:
@@ -551,8 +597,11 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         and scores["spam"] < 5
         and scores["recruiter"] < 4
         and (
-            signals.get("urgent", 0) >= urgency_threshold()
-            or _same_day_deadline(lowered)
+            _same_day_deadline(lowered)
+            or (
+                signals.get("urgent", 0) >= urgency_threshold()
+                and (_outage_claim(lowered) or _operational_deadline(lowered))
+            )
         )
     ):
         scores["urgent"] = max(scores["urgent"], 6.0)
@@ -671,7 +720,18 @@ def _name_script(token: str) -> str:
     return ""
 
 
+_LEGAL_SUFFIX = re.compile(
+    r"\b(?:inc|llc|ltd|gmbh|corp|corporation|plc|ag|sarl|sas|bv|"
+    r"co|limited|incorporated|press|labs|group|partners|counsel)\.?$",
+    re.IGNORECASE,
+)
+_TRUNCATION_LINE = re.compile(r"^\[truncated\]$", re.IGNORECASE)
+
+
 def is_person(value: str) -> bool:
+    # A legal-suffix line is the organization, even when both words are capitalized.
+    if _LEGAL_SUFFIX.search((value or "").strip()):
+        return False
     tokens = _name_tokens(value)
     if 2 <= len(tokens) <= 4 and all(_name_script(token) in {"cjk", "ar"} for token in tokens):
         return len({_name_script(token) for token in tokens}) == 1
@@ -813,6 +873,8 @@ def extract_company(email: dict, known_contacts: list[dict] | None = None) -> st
     for line in signature:
         if "@" in line or line.lower().startswith("http"):
             continue
+        if _TRUNCATION_LINE.match(line.strip()):
+            continue
         if sum(character.isdigit() for character in line) >= 7:
             continue
         if is_title(line) or _department(line) or _role_line(line) or "。" in line or "、" in line or _GREETING.match(line):
@@ -820,6 +882,8 @@ def extract_company(email: dict, known_contacts: list[dict] | None = None) -> st
         if line.endswith("،"):
             continue
         cleaned = _tidy_company(line)
+        if _TRUNCATION_LINE.match(cleaned.strip()):
+            continue
         sender_name = (email.get("from_name") or "").strip()
         if sender_name and sender_name in cleaned and cleaned != sender_name:
             cleaned = _tidy_company(cleaned.replace(sender_name, " ")).strip(" ,.-")
@@ -843,6 +907,10 @@ def extract_company(email: dict, known_contacts: list[dict] | None = None) -> st
                 continue
         if not is_person(cleaned) or seen_name or not is_person(sender):
             return cleaned
+    # The From line is the organization when it carries a legal suffix.
+    # A footer that only repeats a brand ("HubSpot" / "HubSpot, Inc.") stays skipped.
+    if _LEGAL_SUFFIX.search(sender) and _company_line(sender.strip()):
+        return _tidy_company(sender.strip())
     return None
 
 

@@ -26,9 +26,19 @@ _NUMWORD = (
 _WORD_AMOUNT = re.compile(
     rf"\b(?P<words>(?:{_NUMWORD})(?:[-\s]+(?:{_NUMWORD})){{0,3}})\s+"
     rf"(?P<unit>hundred|thousand)(?:\s+(?P<extra>hundred|thousand))?"
-    rf"(?:\s+(?:us\s+)?(?P<cur>quid|dollars?|euros?|pounds?|usd|eur|gbp))?",
+    rf"(?:\s+(?:us\s+)?(?P<cur>[^\W\d_]{{2,24}}))?",
     re.IGNORECASE,
 )
+# The next English word is not a currency. An unlisted currency word is kept.
+_NOT_CURRENCY = {
+    "for", "and", "the", "to", "of", "on", "in", "with", "before", "after",
+    "plus", "including", "from", "our", "per", "toward", "towards", "over",
+    "under", "about", "around", "this", "that", "which", "when", "where",
+    "a", "an", "as", "at", "by", "into", "if", "or", "is", "are", "was",
+    "were", "be", "been", "it", "its", "we", "they", "you", "your", "my",
+    "their", "approved", "available", "only", "just", "please", "year",
+    "phase", "project", "budget", "quote",
+}
 _ROMANCE_ONES = {
     "un": 1, "uno": 1, "une": 1, "una": 1,
     "dos": 2, "deux": 2, "dois": 2, "duas": 2,
@@ -147,8 +157,10 @@ def parse_number(raw: str) -> float:
 
 
 def _written_symbol(token: str) -> str | None:
-    """The currency the sender wrote. Missing currency is not dollars."""
+    """The currency the sender wrote. An unlisted word is not turned into dollars."""
     key = (token or "").casefold().replace("ó", "o").replace("á", "a")
+    if not key:
+        return None
     if key.startswith("euro"):
         return "€"
     if key.startswith("libr") or key.startswith("livre") or key in {"quid", "pound", "pounds", "gbp"}:
@@ -157,7 +169,10 @@ def _written_symbol(token: str) -> str | None:
         return "R$"
     if key.startswith("dolar") or key.startswith("dollar") or key in {"usd", "bucks"}:
         return "$"
-    return _symbol(token) if token else None
+    return {
+        "USD": "$", "EUR": "€", "GBP": "£", "BRL": "R$", "MXN": "MXN",
+        "$": "$", "€": "€", "£": "£", "R$": "R$",
+    }.get(key.upper())
 
 
 def _symbol(token: str) -> str:
@@ -241,9 +256,22 @@ def extract_budget(text: str) -> str | None:
     words = _WORD_AMOUNT.search(text)
     spoken = _spoken_value(words) if words else None
     if spoken is not None:
-        symbol = _symbol(words.group("cur") or "$")
-        if not words.group("cur") and re.search(r"\beuros?\b", text[words.end() : words.end() + 24], re.I):
-            symbol = "€"
+        raw_cur = (words.group("cur") or "").strip(".,;:")
+        if raw_cur.casefold() in _NOT_CURRENCY:
+            raw_cur = ""
+        if not raw_cur:
+            symbol = "$"
+            if re.search(r"\beuros?\b", text[words.end() : words.end() + 24], re.I):
+                symbol = "€"
+            return _fmt(symbol, spoken)
+        symbol = _written_symbol(raw_cur)
+        if symbol is None:
+            # Keep the written currency. Do not invent a dollar sign.
+            if abs(spoken - round(spoken)) < 0.001:
+                shown = f"{int(round(spoken)):,}"
+            else:
+                shown = f"{spoken:,.2f}"
+            return f"{raw_cur.casefold()} {shown}"
         return _fmt(symbol, spoken)
     romance = _ROMANCE_AMOUNT.search(text)
     if romance:

@@ -52,6 +52,22 @@ _GIFT_CRYPTO = re.compile(
     re.IGNORECASE,
 )
 _IBAN_WORD = re.compile(r"\biban\b|\bswift\b|\bbic\b", re.IGNORECASE)
+# A project budget or a quote is not this. Money similarity counts only with a cue.
+_MONEY_CUE = re.compile(
+    r"\b(?:pay|payment|payments|transfer|wire|wiring|withdraw(?:al)?|payout|wallet|"
+    r"invoice|remittance|iban|swift|bic|routing|sort code|"
+    r"gift\s*cards?|password|credentials?|login|sign[\s-]?in|"
+    r"überweis|virer|pagar|banco|banque|banks?|banking)\b",
+    re.IGNORECASE,
+)
+_BANK_CUE = re.compile(
+    r"\b(?:banks?|banking|iban|swift|bic|routing|sort code|account number)\b",
+    re.IGNORECASE,
+)
+_CREDENTIAL_CUE = re.compile(
+    r"\b(?:password|credentials?|login|sign[\s-]?in|one-time code|passcode)\b",
+    re.IGNORECASE,
+)
 _PLAIN_INVOICE = re.compile(
     r"\b(?:amount due|balance due|invoice\s*#?\s*\d+|inv-\d+|past due|remittance|payment received)\b",
     re.IGNORECASE,
@@ -191,6 +207,17 @@ def _pay_off_domain(text: str, sender_domain: str, hosts: list[str]) -> bool:
     return False
 
 
+def _money_cue(text: str) -> bool:
+    """Pay, invoice, bank, or credential language. A budget or a quote is not a cue."""
+    body = text or ""
+    return bool(
+        _MONEY_CUE.search(body)
+        or _PAY_WINDOW.search(body)
+        or _IBAN_WORD.search(body)
+        or _GIFT_CRYPTO.search(body)
+    )
+
+
 def _plain_letterhead(text: str, pay_off: bool) -> bool:
     if pay_off or _GIFT_CRYPTO.search(text or ""):
         return False
@@ -219,6 +246,7 @@ def features(email: dict, text: str, contacts: list[dict] | None, money_sim: flo
     elif (
         money_sim >= money_threshold()
         and not _plain_letterhead(text, pay_off)
+        and _money_cue(text)
         and (lookalike or shortener or bool(_PAY_WINDOW.search(text or "")) or bool(_IBAN_WORD.search(text or "")))
     ):
         money = 1.0
@@ -245,6 +273,9 @@ def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, signa
     """An ask to move money, change a bank, or give credentials, plus a structural risk.
 
     The ask may come from the learned head, so it is not an English word list.
+    Money similarity on a project budget or a quote is not an ask. It counts
+    only together with a pay, invoice, bank, or credential cue, and only then
+    can an unknown-domain link or a shortener force suspicious.
     A plain invoice on the sender's own domain, including a footer that only
     prints the account it is already paid to, is not suspicious.
     """
@@ -282,11 +313,12 @@ def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, signa
     )
     if row["aligned"] and not structural:
         return False
+    # A warm money head on a budget is not enough. Pair each head with its cue.
     ask = bool(
         row["money"] >= 1.0
-        or money_sim >= ask_threshold()
-        or bank_sim >= ask_threshold()
-        or credential_sim >= ask_threshold()
+        or (money_sim >= ask_threshold() and _money_cue(text))
+        or (bank_sim >= ask_threshold() and bool(_BANK_CUE.search(text or "")))
+        or (credential_sim >= ask_threshold() and bool(_CREDENTIAL_CUE.search(text or "")))
     )
     if ask and structural:
         return True
