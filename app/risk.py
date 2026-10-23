@@ -238,18 +238,39 @@ _NEW_PAYABLE_ACCOUNT = re.compile(
     r"new\s+(?:bank\s+)?accounts?(?!\s+(?:manager|executive|team|director|owner|rep|plan|plans|payable)))\b",
     re.IGNORECASE,
 )
-# A bank or institution move, in either order, including the same shape in
-# Spanish and French. "no change" is removed before this runs.
+# A bank or institution move, in either order. The same shape is recognized
+# in the languages the desk claims, not only English, Spanish, and French.
+# "no change" is removed before this runs.
 _BANK_NOUN = (
-    r"(?:banks?|banking|institutions?|banco|banque|bancos|"
-    r"bancaires?|bancari[oa]s?|entidad(?:es)?|instituci[oó]n(?:es)?|"
+    r"(?:banks?|banking|institutions?|institut(?:e|s|ion|ions|es)?|"
+    r"kreditinstitute?|bankverbindung(?:en)?|bankkonten|bankkonto|"
+    r"kontodaten|bankdaten|konto|"
+    r"banco|banque|bancos|bancaires?|bancari[oa]s?|"
+    r"entidad(?:es)?|instituci[oó]n(?:es)?|"
+    r"institui[cç][aã]o(?:es)?|instituicao|"
     r"coordonn[ée]es|rib)"
 )
 _BANK_VERB = (
     r"(?:chang(?:e|ed|es|ing|é|ée|ées|ement|ements)?|"
     r"mov(?:e|ed|es|ing)|migrat(?:e|ed|es|ing|ion)|switch(?:ed|es|ing)?|"
-    r"cambi(?:o|ó|amos|ado|aron|ar|a|é)|modifi(?:é|ée|ées|er)|"
-    r"replac(?:e|ed|es|ing)|updat(?:e|ed|es|ing))"
+    r"cambi(?:o|ó|amos|ado|aron|ar|a|é)|modifi(?:é|ée|ées|er|e)|"
+    r"replac(?:e|ed|es|ing)|updat(?:e|ed|es|ing)|"
+    r"gewechselt|geaendert|geändert|umgestellt|aktualisiert|"
+    r"wechsel(?:n|t)?|aendern|ändern|"
+    r"alter(?:a|amos|ámos|ado|ou|ar|e)|"
+    r"mud(?:a|amos|ou|ado|ar|ança|anca)|"
+    r"atualiz(?:a|amos|ámos|ado|ar))"
+)
+# Non-Latin and romanized institution changes. Latin \b patterns miss these.
+_BANK_MOVE_OTHER = re.compile(
+    r"(?:银行|銀行).{0,24}(?:更改|变更|更换|変更|换了)"
+    r"|(?:更改|变更|更换|変更).{0,24}(?:银行|銀行|口座|账号|帳戶)"
+    r"|口座.{0,16}変更|変更.{0,16}(?:口座|銀行)"
+    r"|تغيير.{0,32}(?:البنك|حساب|بنك|مؤسسة)"
+    r"|(?:البنك|حساب|بنك|مؤسسة).{0,32}تغيير"
+    r"|\b(?:bank|banks|institution|account|konto)\b.{0,48}\b(?:badal\w*|tabdeel\w*|badla)\b"
+    r"|\b(?:badal\w*|tabdeel\w*|badla)\b.{0,48}\b(?:bank|banks|institution|account|konto)\b",
+    re.IGNORECASE | re.DOTALL,
 )
 _BANK_MOVE = re.compile(
     rf"\b{_BANK_VERB}\b.{{0,40}}\b{_BANK_NOUN}\b|\b{_BANK_NOUN}\b.{{0,40}}\b{_BANK_VERB}\b",
@@ -337,10 +358,22 @@ _RAIL_NOTICE = re.compile(
     r")\b[^.!\n]*",
     re.IGNORECASE,
 )
-_IBAN_CANDIDATE = re.compile(
-    r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b",
-    re.IGNORECASE,
-)
+# Official IBAN lengths (country code + check digits + BBAN). A candidate
+# stops at that length, so a following word is not part of the checksum.
+_IBAN_LENGTH = {
+    "AL": 28, "AD": 24, "AT": 20, "AZ": 28, "BH": 22, "BE": 16, "BA": 20,
+    "BR": 29, "BG": 22, "CR": 22, "HR": 21, "CY": 28, "CZ": 24, "DK": 18,
+    "DO": 28, "EG": 29, "SV": 28, "EE": 20, "FO": 18, "FI": 18, "FR": 27,
+    "GE": 22, "DE": 22, "GI": 23, "GR": 27, "GL": 18, "GT": 28, "HU": 28,
+    "IS": 26, "IQ": 23, "IE": 22, "IL": 23, "IT": 27, "JO": 30, "KZ": 20,
+    "XK": 20, "KW": 30, "LV": 21, "LB": 28, "LI": 21, "LT": 20, "LU": 20,
+    "MT": 31, "MR": 27, "MU": 30, "MD": 24, "MC": 27, "ME": 22, "NL": 18,
+    "MK": 19, "NO": 15, "PK": 24, "PS": 29, "PL": 28, "PT": 25, "QA": 29,
+    "RO": 24, "LC": 32, "SM": 27, "ST": 25, "SA": 24, "RS": 22, "SC": 31,
+    "SK": 24, "SI": 19, "ES": 24, "SE": 24, "CH": 21, "TL": 23, "TN": 24,
+    "TR": 26, "UA": 29, "AE": 23, "GB": 22, "VA": 22, "VG": 24,
+}
+_IBAN_START = re.compile(r"\b([A-Z]{2})\d{2}", re.IGNORECASE)
 _BIC_LABELED = re.compile(
     r"\b(?:bic|swift)\b[^A-Za-z0-9]{0,16}([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b",
     re.IGNORECASE,
@@ -650,6 +683,47 @@ def _credential_request(text: str, sender: str) -> bool:
     return False
 
 
+_CREDENTIAL_NEAR = re.compile(
+    r"\b(?:password|passcode|credentials?|sign[- ]?in|log[- ]?in)\b",
+    re.IGNORECASE,
+)
+_CREDENTIAL_PATH = re.compile(
+    r"/(?:credentials?|passwords?|logins?|sign-?ins?)\b",
+    re.IGNORECASE,
+)
+_CREDENTIAL_COMPLAINT = re.compile(
+    r"\b(?:can(?:not|'t)|unable to)\s+(?:log ?in|sign ?in|reset)\b"
+    r"|\b(?:password reset never arrives|login loop|not working|does(?:n't| not) work|"
+    r"is broken|ne fonctionne pas|n[aã]o funciona|nao funciona)\b",
+    re.IGNORECASE,
+)
+
+
+def borrowed_credential_link(text: str, sender: str) -> bool:
+    """A credential link whose host is a private domain the sender does not own.
+
+    A real brand's own host, and a host on the sender's domain, are left alone.
+    A note that only says a login is broken is not this, unless the link path
+    itself is a credential form.
+    """
+    body = text or ""
+    complaint = bool(_CREDENTIAL_COMPLAINT.search(body))
+    sender_domain = _domain(sender)
+    for match in _URL.finditer(body):
+        host = _host(match.group(1) if match.lastindex else match.group(0))
+        if not host or _same_org_host(host, sender_domain):
+            continue
+        if any(_legit(host, suffixes) for suffixes in _BRANDS.values()):
+            continue
+        tail = body[match.end() : match.end() + 48]
+        path_hit = bool(_CREDENTIAL_PATH.search(tail))
+        window = body[max(0, match.start() - 80) : match.end() + 80]
+        word_hit = bool(_CREDENTIAL_NEAR.search(window))
+        if path_hit or (word_hit and not complaint):
+            return True
+    return False
+
+
 def _untrusted_challenge(text: str, sender: str) -> bool:
     """Verify or unlock, plus a link that is not the brand the sender claims to be."""
     if not re.search(
@@ -676,6 +750,30 @@ def _strip_additive_cc(text: str) -> str:
 def _without_reassurance(text: str) -> str:
     """Drop a clause that says the bank details did not change."""
     return _REASSURANCE.sub(" ", text or "")
+
+
+def _iban_candidates(text: str):
+    """IBAN strings cut at the country length. A later word is left outside."""
+    upper = (text or "").upper()
+    for match in _IBAN_START.finditer(upper):
+        need = _IBAN_LENGTH.get(match.group(1).upper())
+        if not need:
+            continue
+        chars: list[str] = []
+        index = match.start()
+        while index < len(upper) and len(chars) < need:
+            char = upper[index]
+            if char.isalnum():
+                chars.append(char)
+            elif char == " ":
+                word = re.match(r"[A-Z]{5,}", upper[index + 1 :])
+                if word:
+                    break
+            else:
+                break
+            index += 1
+        if len(chars) == need:
+            yield "".join(chars)
 
 
 def _iban_valid(token: str) -> bool:
@@ -718,7 +816,7 @@ def _routing_and_account(text: str) -> bool:
 def _account_shapes(text: str) -> bool:
     """A real IBAN, a labeled BIC, a US routing-and-account pair, or a UK sort code and account."""
     upper = text.upper()
-    if any(_iban_valid(match.group(0)) for match in _IBAN_CANDIDATE.finditer(upper)):
+    if any(_iban_valid(token) for token in _iban_candidates(upper)):
         return True
     if _BIC_LABELED.search(upper):
         return True
@@ -759,7 +857,11 @@ def invoice_address_notice(text: str) -> bool:
 
 def _bank_change(text: str) -> bool:
     cleaned = _without_reassurance(text or "")
-    return bool(_BANK_MOVE.search(cleaned) or _PAYMENTS_NOW.search(cleaned))
+    return bool(
+        _BANK_MOVE.search(cleaned)
+        or _PAYMENTS_NOW.search(cleaned)
+        or _BANK_MOVE_OTHER.search(cleaned)
+    )
 
 
 def _consumer_rail_request(text: str) -> bool:
@@ -791,9 +893,10 @@ def _payment_destination_shift(text: str) -> bool:
 def payment_related(text: str) -> bool:
     """True when the text moves money or changes where an existing payment goes.
 
-    A valid IBAN, a labeled BIC or SWIFT code, a US account with an ABA routing
+    A valid IBAN is cut at the country length, so a following word is not
+    consumed. A labeled BIC or SWIFT code, a US account with an ABA routing
     number, or a UK sort code with an account number matches. So does a bank
-    or institution change, including the same shape in Spanish or French, and
+    or institution change in the languages the desk claims, and
     a request to send a payment to the account in an attached letter. Asking
     a first contact, or a payment-change note, to pay by Zelle, Venmo, Cash
     App, or PayPal.me matches. A receipt or notification from those services

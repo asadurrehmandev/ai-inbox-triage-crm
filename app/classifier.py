@@ -265,6 +265,58 @@ def _defect(text: str) -> bool:
     return bool(_DEFECT.search(_DENIED_DEFECT.sub(" ", text or "")))
 
 
+# A denial of an outage, or one person's control, is support. A service-wide
+# failure is not this shape. The phrases are closed classes, not a mailbox.
+_OUTAGE_DENIAL = re.compile(
+    r"\bno outage\b|\bnot an outage\b|\bthere is no outage\b"
+    r"|\bpas une panne\b|\bpas de panne\b"
+    r"|\bn[aã]o [eé] uma queda\b|\bnao e uma queda\b"
+    r"|\bsem interrup[cç][aã]o geral\b|\bsem interrupcao geral\b"
+    r"|\bkeine st[oö]rung\b|\bkein ausfall\b",
+    re.IGNORECASE,
+)
+_PERSONAL_CONTROL = re.compile(
+    r"\b(?:bouton|bot[aã]o|botao|controle|contr[oô]le|control|champ|campo|button)\b",
+    re.IGNORECASE,
+)
+_CONTROL_BROKEN = re.compile(
+    r"\b(?:cass[eé]|ne r[eé]pond(?: plus)?|ne repond(?: plus)?|"
+    r"n[aã]o responde|nao responde|n[aã]o funciona|nao funciona|"
+    r"est[aá] quebrado|esta quebrado|n[aã]o abre|nao abre|is stuck|is broken)\b",
+    re.IGNORECASE,
+)
+_SERVICE_WIDE = re.compile(
+    r"\b(?:whole (?:system|service|shop|site)|all customers|"
+    r"every (?:user|customer|register|desk)|syst[eè]me entier|sistema inteiro|"
+    r"todos os clientes|site is down|hors service)\b",
+    re.IGNORECASE,
+)
+_PROJECT_WORD = re.compile(
+    r"\b(?:budget|presupuesto|devis|or[cç]amento|orcamento)\b|予算|ميزانية|预算",
+    re.IGNORECASE,
+)
+_SALARY_SENTENCE = re.compile(
+    r"[^.!\n]*\b(?:compensation|salary|gehalt|salaire|salario)\b[^.!\n]*",
+    re.IGNORECASE,
+)
+
+
+def _single_seat(text: str) -> bool:
+    """A denied outage, or a broken control for one person. Not a service outage."""
+    if _SERVICE_WIDE.search(text or ""):
+        return False
+    if _OUTAGE_DENIAL.search(text or ""):
+        return True
+    return bool(_PERSONAL_CONTROL.search(text or "") and _CONTROL_BROKEN.search(text or ""))
+
+
+def _project_budget(text: str) -> str | None:
+    """The project figure when a wage is also written. A salary alone is not one."""
+    if not _PROJECT_WORD.search(text or ""):
+        return None
+    return extract_budget(_SALARY_SENTENCE.sub(" ", text or ""))
+
+
 def _salary_context(text: str) -> bool:
     """A wage, not a project budget. The recruiter label is not required."""
     if _SALARY.search(text or ""):
@@ -440,8 +492,12 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         scores["support"] += 4
         scores["lead"] -= 5
         note("a support thread")
-    if _RECRUITER.search(lowered) or (
-        _salary_context(lowered) and not re.search(r"\b(?:quote|proposal|retainer|sow)\b", lowered)
+    if not _project_budget(lowered) and (
+        _RECRUITER.search(lowered)
+        or (
+            _salary_context(lowered)
+            and not re.search(r"\b(?:quote|proposal|retainer|sow|budget|presupuesto|devis)\b", lowered)
+        )
     ):
         scores["lead"] = 0
         scores["invoice"] = 0
@@ -501,6 +557,10 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     ):
         scores["urgent"] = max(scores["urgent"], 6.0)
         note("customer impact, a security incident, or a same-day deadline")
+    if _single_seat(lowered):
+        scores["urgent"] = 0
+        scores["support"] = max(scores["support"], 6.0)
+        note("a single control, not an outage")
     if max(scores.values()) < 4:
         guessed = signals.get("label")
         if (signals.get("label_p") or 0) < 0.45:
@@ -591,8 +651,30 @@ _PARTICLE = {
 }
 
 
+def _name_script(token: str) -> str:
+    letters = [char for char in token if char.isalpha()]
+    if not letters:
+        return ""
+    kinds = set()
+    for char in letters:
+        code = ord(char)
+        if 0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or 0x3040 <= code <= 0x30FF or 0xAC00 <= code <= 0xD7AF:
+            kinds.add("cjk")
+        elif 0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F or 0x08A0 <= code <= 0x08FF:
+            kinds.add("ar")
+        else:
+            kinds.add("other")
+    if kinds == {"cjk"}:
+        return "cjk"
+    if kinds == {"ar"}:
+        return "ar"
+    return ""
+
+
 def is_person(value: str) -> bool:
     tokens = _name_tokens(value)
+    if 2 <= len(tokens) <= 4 and all(_name_script(token) in {"cjk", "ar"} for token in tokens):
+        return len({_name_script(token) for token in tokens}) == 1
     if len(tokens) < 2 or len(tokens) > 4:
         return False
     capitals = 0
@@ -1164,6 +1246,7 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
             elif scores.get("lead", 0) >= 4 and (
                 _COMMERCIAL_ASK.search(text)
                 or (extract_budget(text) and not _salary_context(text))
+                or _project_budget(text)
             ):
                 category = "lead"
                 if "urgent" not in secondary:
@@ -1177,9 +1260,25 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
             name = None
             company = None
         body_only = strip_quotes(strip_injection_notes(html_to_text(prepared.get("body") or "")))
-        budget = extract_budget(text)
-        if budget and (category == "recruiter" or _salary_context(text) or _RECRUITER.search(text)):
+        project = _project_budget(text)
+        budget = project or extract_budget(text)
+        if project:
+            budget = project
+        elif budget and (category == "recruiter" or _salary_context(text) or _RECRUITER.search(text)):
             budget = None
+        # An organization and a project budget keep the lead label, including
+        # when the note is Spanish, German, Arabic, or Japanese and the urgency
+        # head is hot. A same-day legal deadline stays urgent.
+        if (
+            category in {"urgent", "review"}
+            and company
+            and budget
+            and _PROJECT_WORD.search(text)
+            and not _same_day_deadline(text)
+        ):
+            if category == "urgent" and "urgent" not in secondary:
+                secondary = [*secondary, "urgent"]
+            category = "lead"
         if budget and category == "review" and "a price is written in the message" not in reasons:
             reasons = [*reasons, "a price is written in the message"]
         if budget and _suppress_budget(prepared, text) and category not in {"invoice", "lead"}:

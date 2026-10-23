@@ -23,7 +23,9 @@ from app.dkim_verify import verified_dkim_domains
 from app.classifier import known_sender
 from app.normalize import open_channels
 from app.prepare import strip_quotes
-from app.risk import assess_risk, deceptive_pay_link, hard_flags, invoice_address_notice, payment_related
+from app.heads import assess
+from app.risk import assess_risk, borrowed_credential_link, deceptive_pay_link, hard_flags, invoice_address_notice, payment_related
+from app.risk_score import _GIFT_CRYPTO, _IBAN_WORD, _PAY_WINDOW, decide_suspicious, features
 
 log = logging.getLogger("lane.gate")
 
@@ -518,6 +520,23 @@ def always_confirm_features(email: dict) -> list[str]:
     return _dedupe(reasons)
 
 
+def _risky_payment_ask(email: dict, text: str, contacts: list[dict] | None) -> bool:
+    """A payment ask on free mail, a shortener, or another risky channel.
+
+    A bare shortener or an unknown-domain link, with no payment words, is not
+    this. Confirm may still clear that banner.
+    """
+    if not (_PAY_WINDOW.search(text or "") or _IBAN_WORD.search(text or "") or _GIFT_CRYPTO.search(text or "")):
+        return False
+    signals = assess(text)
+    if not decide_suspicious(email, text, contacts, signals):
+        return False
+    row = features(email, text, contacts, float(signals.get("money_sim") or 0.0))
+    return bool(
+        row["free_mail"] or row["shortener"] or row["lookalike"] or row["link_mismatch"] or row["claims_org"]
+    )
+
+
 def evaluate_filing(
     email: dict,
     *,
@@ -556,6 +575,16 @@ def evaluate_filing(
             code="security",
             message="blocked: verify by phone or security review",
             reasons=blocking,
+        )
+    # A forced lead label does not drop the suspicious decision. Confirm may
+    # still clear a generic unknown-domain or shortener banner on ordinary mail.
+    sender = email.get("from_email") or ""
+    if borrowed_credential_link(readable, sender) or _risky_payment_ask(email, readable, known_contacts):
+        return FilingDecision(
+            allow=False,
+            code="suspicious",
+            message="blocked: a suspicious message cannot be filed as a lead",
+            reasons=["the scorer marks this message suspicious"],
         )
     features: list[str] = []
     if gate_first_contact(email, known_contacts):

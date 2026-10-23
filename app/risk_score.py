@@ -18,10 +18,12 @@ from app.risk import (
     _BRANDS,
     _LEET,
     _URL,
+    _bank_change,
     _domain,
     _edit_distance,
     _legit,
     _registrable_label,
+    borrowed_credential_link,
     free_mail,
     deceptive_pay_link,
     lookalike_domain,
@@ -254,8 +256,16 @@ def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, signa
         money_sim = float(signals or 0.0)
         bank_sim = 0.0
         credential_sim = 0.0
+    sender = email.get("from_email") or ""
+    # A bank-detail change is suspicious in every claimed language, before a
+    # soft confirm and before an aligned letterhead can clear it.
+    if _bank_change(text):
+        return True
+    # A credential link on someone else's private domain outranks urgent.
+    if borrowed_credential_link(text, sender):
+        return True
     # A lookalike or child-domain pay link is suspicious before any soft confirm.
-    if deceptive_pay_link(text, email.get("from_email") or "", contacts):
+    if deceptive_pay_link(text, sender, contacts):
         return True
     row = features(email, text, contacts, money_sim)
     reply = str(email.get("reply_to") or email.get("reply-to") or "")
