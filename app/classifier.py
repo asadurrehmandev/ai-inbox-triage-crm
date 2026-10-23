@@ -1,8 +1,10 @@
 """Rule engine used when no model key is set, and as the visible fallback.
 
-Patterns are general (outages, invoices, proposals, promotions). They are not
-a word list copied from the sample mailbox. Phishing and injection are decided
-in app.risk before any category score is trusted.
+Category scores are regular expressions: invoices, proposals, recruiting,
+opt-out, receipts, and lottery or token spam. The embedding head fills a label
+only when those scores stay under 4. Urgency is a separate head. A same-day
+legal or operational deadline is a closed class on top of that head. Phishing
+and injection are decided in app.risk before any category score is trusted.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from app.risk_score import decide_suspicious
 CATEGORIES = ("lead", "support", "invoice", "spam", "urgent", "suspicious", "review", "recruiter")
 
 _CLOSINGS = re.compile(
-    r"^(thanks|thank you|best regards|kind regards|warm regards|many thanks|best|regards|sincerely|cheers|warmly|cordialement|saludos|mit freundlichen grüßen),?\s*$",
+    r"^(thanks|thank you|best regards|kind regards|warm regards|many thanks|best|regards|sincerely|cheers|warmly|"
+    r"cordialement|saludos|gracias|merci|obrigad[oa]|danke|mit freundlichen grüßen),?\s*$",
     re.IGNORECASE,
 )
 _ROLE = {
@@ -97,21 +100,6 @@ _OOO = re.compile(
     r"r[ée]ponse automatique|resposta autom[aá]tica)\b|i am out of the office",
     re.IGNORECASE,
 )
-_OUTAGE = re.compile(
-    r"\b(?:production is down|went down|is down|are down|outage|site down|sev-?1|p0|"
-    r"offline|not responding)\b",
-    re.IGNORECASE,
-)
-_SERVICE = (
-    r"system|systems|site|website|platform|orders?|shop|portal|service"
-)
-_DOWN_WORD = (
-    r"offline|not working|isn'?t working|does(?:n'?t| not) work|stopped working"
-)
-_NOT_URGENT = re.compile(
-    r"\b(?:not urgent|no rush|no hurry|low priority)\b",
-    re.IGNORECASE,
-)
 _INVOICE_EVIDENCE = re.compile(
     r"\b(?:amount due|balance due|payment due|total due|please pay|kindly pay|"
     r"pay this invoice|invoice\s*#?\s*\d+|inv-\d+|past due|remittance|"
@@ -120,7 +108,8 @@ _INVOICE_EVIDENCE = re.compile(
     r"应付|請求書|お支払額)\b"
     r"|factura\s*(?:n[oº.]|no|#|\d)"
     r"|rechnung\s*(?:nr|#|\d)"
-    r"|fatura\s*(?:n|#|\d)",
+    r"|fatura\s*(?:n|#|\d)"
+    r"|\b(?:recibo(?:\s+de(?:l| su)?(?:\s+pedido)?)?|reçu|quittung|nota fiscal)\b",
     re.IGNORECASE,
 )
 _RECRUITER = re.compile(
@@ -131,7 +120,11 @@ _RECRUITER = re.compile(
     re.IGNORECASE,
 )
 _SALARY = re.compile(
-    r"\b(?:salary|compensation|\bote\b|per annum|annually|base pay)\b",
+    r"\b(?:salary|compensation|\bote\b|per annum|annually|base pay|salario|gehalt|salaire)\b",
+    re.IGNORECASE,
+)
+_SALARY_PERIOD = re.compile(
+    r"\b(?:a year|per year|per annum|annually|al año|par an|pro jahr|por ano)\b",
     re.IGNORECASE,
 )
 _REFERRAL = re.compile(
@@ -163,9 +156,37 @@ _OVERDUE = re.compile(
     re.IGNORECASE,
 )
 _NEWSLETTER = re.compile(
-    r"\b(?:unsubscribe|opt out|manage preferences|newsletter|webinar)\b",
+    r"(?:unsubscribe|opt[- ]out|manage preferences|newsletter|webinar|"
+    r"abbestellen|abmelden|désabonner|desabonner|darse de baja|descadastrar|"
+    r"إلغاء الاشتراك|退订|取消订阅|配信停止|"
+    r"tir(?:é|e) au sort|allocation de jetons|loter[ií]a|ha ganado|gewinnspiel|sorteio|"
+    r"airdrop|空投|代币|"
+    r"\bbestellen\b[^.]{0,80}\bab\b)",
     re.IGNORECASE,
 )
+_DEADLINE_WHEN = re.compile(
+    r"\b(?:today|end of (?:the )?day|before the (?:counter|office|window) closes|"
+    r"within the hour|by \d{1,2}(?::\d{2})?\s?(?:am|pm)|"
+    r"heute|aujourd'hui|hoy|hoje|اليوم|今天)\b",
+    re.IGNORECASE,
+)
+_DEADLINE_WHAT = re.compile(
+    r"\b(?:clerk|hearing|court|regulator|exhibit|payroll|statute|venue|"
+    r"inquiry|shipment|tribunal|audiencia)\b",
+    re.IGNORECASE,
+)
+_ROLE_LINE = re.compile(
+    r"\b(?:producer|recruiter|consultant|coordinator|specialist|analyst|supervisor|"
+    r"associate|director|directora|directrice|manager|officer|engineer|founder|"
+    r"president|accountant|projektleiter(?:in)?|cheffe|chef|gestor(?:a)?|gerente|"
+    r"lead)\b",
+    re.IGNORECASE,
+)
+_ORG_MARK = re.compile(
+    r"\b(?:inc|llc|ltd|gmbh|corp|plc|ag|sarl|sas|press|labs|group)\b\.?$",
+    re.IGNORECASE,
+)
+_IDENTITY_STEM = re.compile(r"(?:urgent|outage|emergency|asap|critical)", re.IGNORECASE)
 _HEADER_LINE = re.compile(r"^(?:from|to|cc|bcc|sent|date|subject)\s*:", re.IGNORECASE)
 _COMPANY_SUFFIX = re.compile(
     r"\b(?:co|inc|ltd|llc|gmbh|corp|plc|sa|ag|bv|sarl|sas)\.$",
@@ -224,14 +245,70 @@ def _plain(email: dict) -> str:
     return head_and_tail(f"{email.get('subject', '')}\n{body}")
 
 
-def message_urgent(full_text: str, body: str) -> float:
-    """Urgency of the whole note, or of one real sentence inside it.
+_DEFECT = re.compile(
+    r"\b(?:not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b",
+    re.IGNORECASE,
+)
+_DENIED_DEFECT = re.compile(
+    r"\bnothing is broken\b|\bnot broken\b|\bisn'?t broken\b|\bno bugs?\b",
+    re.IGNORECASE,
+)
+_COMMERCIAL_ASK = re.compile(
+    r"\b(?:quote|quotation|proposal|retainer|budget|sow|statement of work|scope of work|"
+    r"presupuesto|devis|or[cç]amento|bütçe|预算)\b",
+    re.IGNORECASE,
+)
 
-    A greeting and a signature pull the pooled vector off a one-line outage.
-    Scoring the body sentences as well keeps that line. Fragments under 40
-    characters are skipped so a short calm clause cannot trip the head.
-    A leading name is tried both ways, because "Asad," is not the request.
-    """
+
+def _defect(text: str) -> bool:
+    """A reported fault. 'Nothing is broken' is not one."""
+    return bool(_DEFECT.search(_DENIED_DEFECT.sub(" ", text or "")))
+
+
+def _salary_context(text: str) -> bool:
+    """A wage, not a project budget. The recruiter label is not required."""
+    if _SALARY.search(text or ""):
+        return True
+    return bool(_SALARY_PERIOD.search(text or "") and re.search(
+        r"\b(?:package|salary|compensation|seat|role|gehalt|salaire|salario)\b",
+        text or "",
+        re.IGNORECASE,
+    ))
+
+
+def _same_day_deadline(text: str) -> bool:
+    """A legal or operational deadline dated today. Not an outage template."""
+    return bool(_DEADLINE_WHEN.search(text or "") and _DEADLINE_WHAT.search(text or ""))
+
+
+def _identity_tokens(email: dict | None) -> list[str]:
+    """Sender-name tokens, and a product token that only hides an urgency stem."""
+    if not email:
+        return []
+    found: list[str] = []
+    name = email.get("from_name") or ""
+    for token in re.findall(r"[^\W\d_]{3,}", name, re.UNICODE):
+        found.append(token)
+    blob = f"{email.get('subject') or ''}\n{email.get('body') or ''}"
+    for token in re.findall(r"[^\W\d_]{4,}", blob, re.UNICODE):
+        if token.lower() in {"urgent", "urgently", "urgency", "outage", "emergency", "critical"}:
+            continue
+        if _IDENTITY_STEM.search(token):
+            found.append(token)
+    found.extend(re.findall(r"\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]+)+\b", blob))
+    return found
+
+
+def _scrub_tokens(text: str, tokens: list[str]) -> str:
+    cleaned = text or ""
+    for token in tokens:
+        if len(token) < 3:
+            continue
+        cleaned = re.sub(rf"\b{re.escape(token)}\b", " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _span_urgent(full_text: str, body: str) -> float:
     def _take(text: str, best: float) -> float:
         verdict = assess(text)
         # "Not urgent" is a property of the span. "None of the notices left" is not.
@@ -248,6 +325,26 @@ def message_urgent(full_text: str, body: str) -> float:
         if stripped != sentence and len(stripped) >= 40:
             best = _take(stripped, best)
     return best
+
+
+def message_urgent(full_text: str, body: str, email: dict | None = None) -> float:
+    """Urgency of the whole note, or of one real sentence inside it.
+
+    A greeting and a signature pull the pooled vector off a one-line outage.
+    Scoring the body sentences as well keeps that line. Fragments under 40
+    characters are skipped so a short calm clause cannot trip the head.
+    A leading name is tried both ways, because "Asad," is not the request.
+    A token that exists only because it is the sender or the product name
+    does not clear the threshold.
+    """
+    raw = _span_urgent(full_text, body)
+    tokens = _identity_tokens(email)
+    if not tokens:
+        return raw
+    scrubbed = _span_urgent(_scrub_tokens(full_text, tokens), _scrub_tokens(body, tokens))
+    if raw >= urgency_threshold() and scrubbed < urgency_threshold():
+        return scrubbed
+    return raw
 
 
 def _body_can_be_urgent(email: dict) -> bool:
@@ -269,14 +366,18 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         if label not in reasons:
             reasons.append(label)
 
-    if re.search(r"\b(unsubscribe|opt out|manage preferences)\b", lowered):
-        # A clear newsletter stays spam. The embedding head only fills a gap below 4.
+    if _NEWSLETTER.search(lowered):
+        # A clear opt-out, receipt-adjacent promo, or lottery stays spam.
+        # The embedding head only fills a gap below 4. Category scores stay regex.
         scores["spam"] += 5
         note("unsubscribe or opt-out")
     if re.search(r"\b(click below to claim|limited time offer|you(?:'ve| have) been selected)\b", lowered):
         scores["spam"] += 5
         note("promotional offer")
-    if re.search(r"\b(lottery|inheritance|beneficiary|bitcoin giveaway|crypto wallet|viagra|guest post|backlinks?|do-?follow|work from home|seo package)\b", lowered):
+    if re.search(
+        r"\b(lottery|inheritance|beneficiary|bitcoin giveaway|crypto wallet|viagra|guest post|backlinks?|do-?follow|work from home|seo package|jetons?)\b",
+        lowered,
+    ):
         scores["spam"] += 5
         note("unsolicited promotion")
     if re.search(r"\b10x your\b", lowered):
@@ -307,7 +408,7 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     if re.search(r"\b(budget|looking for|interested in a proposal|we'd like|we would like)\b", lowered):
         scores["lead"] += 2
     if extract_budget(lowered) and re.search(
-        r"\b(want|looking|need|build|automat|hire|help us|help me)\b",
+        r"\b(want|looking|need|build|automat|hire|help us|help me|queremos|voudrions|möchten|moechten)\b",
         lowered,
     ):
         scores["lead"] += 4
@@ -321,7 +422,7 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         scores["lead"] += 4
         note("a referral")
 
-    if re.search(r"\b(not working|is broken|broken|bug|failing|failed|stopped firing|didn't arrive|did not arrive)\b", lowered):
+    if _defect(lowered):
         scores["support"] += 4
         note("a defect is described")
     if re.search(r"\berror\s?\d{3}\b", lowered):
@@ -330,7 +431,7 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         scores["support"] += 4
     if re.search(r"\b(can you (?:check|look|take a look)|when you have a minute)\b", lowered):
         scores["support"] += 2
-    if _SUPPORTISH.search(lowered):
+    if _SUPPORTISH.search(_DENIED_DEFECT.sub(" ", lowered)):
         scores["support"] += 3
         if not _COMMERCIAL.search(lowered):
             scores["support"] = max(scores["support"], 5.0)
@@ -339,7 +440,9 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         scores["support"] += 4
         scores["lead"] -= 5
         note("a support thread")
-    if _RECRUITER.search(lowered):
+    if _RECRUITER.search(lowered) or (
+        _salary_context(lowered) and not re.search(r"\b(?:quote|proposal|retainer|sow)\b", lowered)
+    ):
         scores["lead"] = 0
         scores["invoice"] = 0
         scores["recruiter"] = 6
@@ -378,19 +481,23 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     # The embedding head fills a gap. A clear rule score is left alone.
     guessed = None
     signals = signals or {}
-    # Urgency is the learned head: an outage, a security or legal incident, or a
-    # same-day deadline with a consequence. Rules do not add urgent points.
+    # Urgency is the learned head. A same-day legal or operational deadline is
+    # a closed class, so it still counts when the wording is not an outage.
     # A picture with no words, or a calendar invite, is not an outage note.
     # The subject alone must not carry the urgent score.
-    if signals.get("negated", 0) >= negation_threshold():
+    negated = signals.get("negated", 0) >= negation_threshold()
+    if negated:
         scores["urgent"] = 0
         note("the sender says it is not urgent")
     elif (
         _body_can_be_urgent(email)
-        and signals.get("urgent", 0) >= urgency_threshold()
         and not _NEWSLETTER.search(lowered)
         and scores["spam"] < 5
         and scores["recruiter"] < 4
+        and (
+            signals.get("urgent", 0) >= urgency_threshold()
+            or _same_day_deadline(lowered)
+        )
     ):
         scores["urgent"] = max(scores["urgent"], 6.0)
         note("customer impact, a security incident, or a same-day deadline")
@@ -626,7 +733,7 @@ def extract_company(email: dict, known_contacts: list[dict] | None = None) -> st
             continue
         if sum(character.isdigit() for character in line) >= 7:
             continue
-        if is_title(line) or _department(line) or "。" in line or "、" in line or _GREETING.match(line):
+        if is_title(line) or _department(line) or _role_line(line) or "。" in line or "、" in line or _GREETING.match(line):
             continue
         if line.endswith("،"):
             continue
@@ -678,6 +785,19 @@ def _same_as_sender_name(line: str, sender: str) -> bool:
     if " ".join(words) == " ".join(tokens):
         return True
     return len(words) == 1 and words[0] == tokens[0]
+
+
+def _role_line(line: str) -> bool:
+    """A job or a sign-off, not the organization."""
+    text = (line or "").strip()
+    if not text or _ORG_MARK.search(text):
+        return False
+    if is_title(text) or _department(text) or _CLOSINGS.match(text):
+        return True
+    words = re.findall(r"[^\W\d_]+", text, re.UNICODE)
+    if words and words[-1].lower() in {"counsel", "partner", "partners"} and len(words) == 2:
+        return False
+    return bool(_ROLE_LINE.search(text))
 
 
 def _company_line(line: str) -> bool:
@@ -956,65 +1076,6 @@ def _invoice_evidence(text: str) -> bool:
     return False
 
 
-def is_outage(text: str) -> bool:
-    """A service failure, not a same-day sales deadline or a single failed job.
-
-    'Not working' counts when a system, site, checkout, or booking flow is the
-    thing that failed. A single form or a login for one person stays support.
-    """
-    lowered = text or ""
-    if _OUTAGE.search(lowered):
-        return True
-    if re.search(
-        rf"\b(?:{_SERVICE})\b.{{0,48}}\b(?:{_DOWN_WORD})\b|\b(?:{_DOWN_WORD})\b.{{0,48}}\b(?:{_SERVICE})\b",
-        lowered,
-        re.IGNORECASE,
-    ):
-        return True
-    if re.search(r"\b(?:emergency|emergencia)\b", lowered, re.IGNORECASE) and re.search(
-        rf"\b(?:{_SERVICE}|offline|down|ca[ií]d[oa]|bookings)\b",
-        lowered,
-        re.IGNORECASE,
-    ):
-        return True
-    # A price like $4,500 is not an HTTP 500. The status has to stand alone.
-    if re.search(r"(?<![\d,.])\b5\d\d\b(?![\d,.])", lowered) and re.search(
-        r"\b(customers?|orders?|patients?|checkout|shoppers?)\b",
-        lowered,
-        re.IGNORECASE,
-    ):
-        return True
-    return bool(re.search(r"\b(losing (?:orders|money|customers|patients))\b", lowered, re.IGNORECASE))
-
-
-def has_operational_pressure(text: str) -> bool:
-    """An outage or a deadline. Immediacy alone is not pressure."""
-    lowered = (text or "").lower()
-    if is_outage(lowered) or re.search(
-        r"\b(went down|is down|are down|production is down|outage|offline|not responding)\b",
-        lowered,
-    ):
-        return True
-    if re.search(
-        r"\b(today before \d|today by \d|before \d{1,2}(?::\d{2})?\s?(?:am|pm)|by \d{1,2}\s?(?:am|pm) today|tonight|eod|by end of day|within the hour|in \d{1,2} hours?|within \d{1,2} hours?)\b",
-        lowered,
-    ):
-        return True
-    if re.search(r"\b(sev-?1|p0)\b", lowered):
-        return True
-    if re.search(r"\b(losing (?:orders|money|customers|patients)|nothing is shipping)\b", lowered):
-        return True
-    immediacy = re.search(r"\b(right now|asap|immediately)\b", lowered)
-    impact = re.search(
-        r"\b(for everyone|everyone|every|nothing is shipping|blank (?:white )?page|errors on every|customers|orders|patients)\b",
-        lowered,
-    )
-    broken = re.search(r"\b(down|broken|stopped|error|errors|failing|switch it off)\b", lowered)
-    if re.search(r"\b5\d\d\b", lowered) and impact and re.search(r"\b(throwing|returning|losing|can't|cannot|can not)\b", lowered):
-        return True
-    return bool(immediacy and (impact or broken))
-
-
 def urgent_allowed(
     email: dict,
     text: str,
@@ -1032,7 +1093,7 @@ def urgent_allowed(
     if outage_signal:
         return True
     body = strip_quotes(strip_injection_notes(html_to_text(email.get("body") or "")))
-    return message_urgent(text or "", body) >= urgency_threshold()
+    return message_urgent(text or "", body, email) >= urgency_threshold()
 
 
 def _neighbor_lookalike(email: dict, text: str, contacts: list[dict] | None) -> bool:
@@ -1063,11 +1124,11 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     body_for_urgent = strip_quotes(strip_injection_notes(html_to_text(raw)))
     signals = dict(assess(text))
     # The head is the urgency signal. A long signature must not bury the one line that matters.
-    signals["urgent"] = message_urgent(text, body_for_urgent)
+    signals["urgent"] = message_urgent(text, body_for_urgent, prepared)
     if signals["urgent"] > 0:
         # A negated full-text pool must not cancel a sentence the negation head accepts.
         signals["negated"] = 0.0
-    flags = assess_risk(prepared, full, raw, known_contacts)
+    flags = assess_risk(prepared, full, raw, [*(known_contacts or []), *(domain_contacts or [])])
     if "lookalike_domain" not in flags and _neighbor_lookalike(prepared, full, domain_contacts):
         flags.append("lookalike_domain")
     contacts = [*(known_contacts or []), *(domain_contacts or [])]
@@ -1092,6 +1153,21 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     else:
         scores, reasons = _score(text, prepared, signals)
         category, secondary, confidence, suggested, suggestion_confidence = _choose(scores)
+        # Commercial and recruiting stay their own label. Urgency is secondary.
+        # A same-day legal or operational deadline stays urgent.
+        if category == "urgent" and not _same_day_deadline(text):
+            if scores.get("recruiter", 0) >= 4:
+                category = "recruiter"
+                secondary = [item for item in secondary if item != "urgent"]
+                if scores.get("urgent", 0) >= 4:
+                    secondary = [*secondary, "urgent"]
+            elif scores.get("lead", 0) >= 4 and (
+                _COMMERCIAL_ASK.search(text)
+                or (extract_budget(text) and not _salary_context(text))
+            ):
+                category = "lead"
+                if "urgent" not in secondary:
+                    secondary = [*secondary, "urgent"]
         name = extract_name(visible, known_contacts, accept_display=category not in {"spam", "suspicious"})
         company = extract_company(visible, known_contacts)
         if company is None and category not in {"spam", "suspicious"}:
@@ -1102,7 +1178,7 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
             company = None
         body_only = strip_quotes(strip_injection_notes(html_to_text(prepared.get("body") or "")))
         budget = extract_budget(text)
-        if budget and (category == "recruiter" or _SALARY.search(text) or _RECRUITER.search(text)):
+        if budget and (category == "recruiter" or _salary_context(text) or _RECRUITER.search(text)):
             budget = None
         if budget and category == "review" and "a price is written in the message" not in reasons:
             reasons = [*reasons, "a price is written in the message"]
@@ -1120,19 +1196,14 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
                 flags = [*flags, "payment_related"]
             category = "review"
             confidence = min(confidence, 0.45)
-        # The head is the urgency signal, including for a first contact.
-        head_urgent = (
-            _body_can_be_urgent(prepared)
-            and (signals.get("urgent") or 0) >= urgency_threshold()
-            and (signals.get("negated") or 0) < negation_threshold()
-        )
         if category == "urgent" and not known_sender(prepared, known_contacts) and not existing_thread(prepared):
             if "unverified sender" not in reasons:
                 reasons.append("unverified sender")
         overdue = bool(_OVERDUE.search(readable))
-        if category == "invoice" and (head_urgent or overdue) and "urgent" not in secondary:
+        # Overdue on the sender's own invoice adds urgent as a secondary only.
+        if category == "invoice" and overdue and "urgent" not in secondary:
             secondary = [*secondary, "urgent"]
-            if overdue and "overdue invoice" not in reasons:
+            if "overdue invoice" not in reasons:
                 reasons.append("overdue invoice")
     # Rank is last, after every secondary label, so a suspicious row cannot keep urgent.
     category, secondary = settle(category, secondary, suspicious)

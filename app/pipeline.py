@@ -183,6 +183,7 @@ def accept_suggestion(row: dict, category: str | None = None, *, confirmed: bool
         current_category=row.get("category"),
         target=target,
         known_contacts=_known_contacts(),
+        link_contacts=_domain_contacts(),
         confirmed=confirmed,
     )
     decision.raise_if_refused()

@@ -862,6 +862,111 @@ def payment_lure(text: str, sender: str, known_contacts: list[dict] | None = Non
     return True
 
 
+_ASK_NEAR = re.compile(
+    r"\b(?:pay|payment|transfer|wire|withdraw(?:al)?|payout|wallet|invoice|checkout|"
+    r"billing|password|passcode|sign[- ]?in|log[- ]?in|verify|credential|release)\b",
+    re.IGNORECASE,
+)
+_ASK_PATH = re.compile(
+    r"(?:pay|payment|checkout|invoice|wallet|billing|withdraw|login|signin|sign-in|"
+    r"verify|password|credential|auth|account|release)",
+    re.IGNORECASE,
+)
+
+
+def _registrable_domain(host: str) -> str:
+    parts = [part for part in (host or "").lower().strip(".").split(".") if part]
+    if len(parts) >= 3 and parts[-2] in {"co", "com", "org", "net", "ac"} and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return ".".join(parts)
+
+
+def _same_org_host(host: str, sender_domain: str) -> bool:
+    host = (host or "").lower().strip(".").removeprefix("www.")
+    sender = (sender_domain or "").lower().strip(".").removeprefix("www.")
+    if not host or not sender:
+        return False
+    return host == sender or host.endswith("." + sender)
+
+
+def _brand_domains() -> list[str]:
+    found: list[str] = []
+    for suffixes in _BRANDS.values():
+        for suffix in suffixes:
+            if suffix not in found:
+                found.append(suffix)
+    return found
+
+
+def _child_of_known_domain(host: str, known_domains: list[str]) -> bool:
+    """A known domain used as a label prefix on someone else's registrable domain.
+
+    pay.paypal.com is the real brand. paypal.com.attacker.example is not.
+    """
+    cleaned = (host or "").lower().strip(".").removeprefix("www.")
+    if not cleaned or "." not in cleaned:
+        return False
+    labels = cleaned.split(".")
+    for known in known_domains:
+        known = (known or "").lower().strip(".")
+        if not known or "." not in known:
+            continue
+        if cleaned == known or cleaned.endswith("." + known):
+            continue
+        known_labels = known.split(".")
+        width = len(known_labels)
+        for index in range(0, len(labels) - width + 1):
+            if labels[index : index + width] == known_labels:
+                return True
+    return False
+
+
+def _risky_link_host(host: str, contacts: list[dict] | None) -> bool:
+    if not host:
+        return False
+    if lookalike_domain(host) or known_contact_lookalike(host, contacts):
+        return True
+    domains = _brand_domains()
+    for contact in contacts or []:
+        domain = _domain(contact.get("email") or "")
+        if domain and domain not in domains:
+            domains.append(domain)
+    return _child_of_known_domain(host, domains)
+
+
+def deceptive_pay_link(text: str, sender: str, contacts: list[dict] | None = None) -> bool:
+    """A pay or credential link whose host is a lookalike or a child of a known domain.
+
+    The sender's own domain is not one of those hosts. A real subdomain of a
+    known domain is not one either. The ask is the link path or the words
+    next to the link, so the check does not wait for a soft confirm.
+    """
+    sender_domain = _domain(sender)
+    known = _brand_domains()
+    for contact in contacts or []:
+        domain = _domain(contact.get("email") or "")
+        if domain and domain not in known and domain != sender_domain:
+            known.append(domain)
+    for match in _URL.finditer(text or ""):
+        host = _host(match.group(1))
+        # The attacker's own registrable domain is not cover for a borrowed prefix.
+        # A lookalike that is the sender's domain is still the lookalike.
+        same = _same_org_host(host, sender_domain)
+        if same and not _child_of_known_domain(host, known) and not (
+            lookalike_domain(host) or known_contact_lookalike(host, contacts)
+        ):
+            continue
+        if not _risky_link_host(host, contacts):
+            continue
+        window = (text or "")[max(0, match.start() - 80) : match.end() + 80]
+        path = (text or "")[match.end() : match.end() + 80]
+        if _ASK_PATH.search(path) or _ASK_NEAR.search(window):
+            return True
+    return False
+
+
 def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict] | None = None) -> list[str]:
     """Return risk flags. A suppression note is recorded and does not force the category."""
     flags: list[str] = []
@@ -914,6 +1019,8 @@ def assess_risk(email: dict, text: str, raw: str = "", known_contacts: list[dict
         flags.append("instruction_suppression")
     if payment_related(combined):
         flags.append("payment_related")
+    if deceptive_pay_link(f"{combined}\n{body}", sender, known_contacts):
+        flags.append("deceptive_link")
     return flags
 
 

@@ -23,7 +23,7 @@ from app.dkim_verify import verified_dkim_domains
 from app.classifier import known_sender
 from app.normalize import open_channels
 from app.prepare import strip_quotes
-from app.risk import assess_risk, hard_flags, invoice_address_notice, payment_related
+from app.risk import assess_risk, deceptive_pay_link, hard_flags, invoice_address_notice, payment_related
 
 log = logging.getLogger("lane.gate")
 
@@ -524,6 +524,7 @@ def evaluate_filing(
     current_category: str | None,
     target: str,
     known_contacts: list[dict] | None = None,
+    link_contacts: list[dict] | None = None,
     confirmed: bool = False,
 ) -> FilingDecision:
     """Decide whether this message may be written to the CRM as a lead."""
@@ -538,6 +539,9 @@ def evaluate_filing(
         )
     readable = _readable(email)
     flags = assess_risk(email, readable, email.get("body") or "", known_contacts)
+    if deceptive_pay_link(f"{readable}\n{email.get('body') or ''}", email.get("from_email") or "", link_contacts or known_contacts):
+        if "deceptive_link" not in flags:
+            flags = [*flags, "deceptive_link"]
     if payment_related(readable):
         return FilingDecision(
             allow=False,

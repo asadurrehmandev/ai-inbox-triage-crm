@@ -23,6 +23,7 @@ from app.risk import (
     _legit,
     _registrable_label,
     free_mail,
+    deceptive_pay_link,
     lookalike_domain,
 )
 
@@ -253,6 +254,9 @@ def decide_suspicious(email: dict, text: str, contacts: list[dict] | None, signa
         money_sim = float(signals or 0.0)
         bank_sim = 0.0
         credential_sim = 0.0
+    # A lookalike or child-domain pay link is suspicious before any soft confirm.
+    if deceptive_pay_link(text, email.get("from_email") or "", contacts):
+        return True
     row = features(email, text, contacts, money_sim)
     reply = str(email.get("reply_to") or email.get("reply-to") or "")
     reply_domain = _domain(reply) if "@" in reply else ""

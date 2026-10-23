@@ -33,6 +33,7 @@ function pageTitle(pathname: string) {
   if (pathname === "/crm") return "CRM";
   if (pathname === "/pipeline") return "Python worker";
   if (pathname === "/alerts") return "Alerts";
+  if (pathname.startsWith("/approve")) return "Approval";
   return "Inbox";
 }
 
@@ -52,6 +53,10 @@ export function LaneShell({ children }: { children: ReactNode }) {
   const stats = desk.stats;
   const title = pageTitle(pathname);
   const lastRun = desk.worker?.last_run?.finished_at;
+
+  useEffect(() => {
+    document.title = title === "Inbox" ? "Lane" : `${title} · Lane`;
+  }, [title]);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {

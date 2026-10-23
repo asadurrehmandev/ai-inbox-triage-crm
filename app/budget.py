@@ -29,6 +29,49 @@ _WORD_AMOUNT = re.compile(
     rf"(?:\s+(?:us\s+)?(?P<cur>quid|dollars?|euros?|pounds?|usd|eur|gbp))?",
     re.IGNORECASE,
 )
+_ROMANCE_ONES = {
+    "un": 1, "uno": 1, "une": 1, "una": 1,
+    "dos": 2, "deux": 2, "dois": 2, "duas": 2,
+    "tres": 3, "três": 3, "trois": 3,
+    "cuatro": 4, "quatre": 4, "quatro": 4,
+    "cinco": 5, "cinq": 5,
+    "seis": 6, "six": 6,
+    "siete": 7, "sept": 7, "sete": 7,
+    "ocho": 8, "huit": 8, "oito": 8,
+    "nueve": 9, "neuf": 9, "nove": 9,
+    "diez": 10, "dix": 10, "dez": 10,
+    "once": 11, "onze": 11,
+    "doce": 12, "douze": 12, "doze": 12,
+    "trece": 13, "treze": 13,
+    "catorce": 14, "catorze": 14, "quatorze": 14,
+    "quince": 15, "quinze": 15,
+    "veinte": 20, "vingt": 20, "vinte": 20,
+    "treinta": 30, "trente": 30, "trinta": 30,
+    "cuarenta": 40, "quarante": 40, "quarenta": 40,
+    "cincuenta": 50, "cinquante": 50, "cinquenta": 50,
+}
+_ROMANCE_HUNDREDS = {
+    "cien": 100, "ciento": 100, "cent": 100,
+    "doscientos": 200, "trescientos": 300, "cuatrocientos": 400,
+    "quinientos": 500, "seiscientos": 600, "setecientos": 700,
+    "ochocientos": 800, "novecientos": 900,
+}
+_ROMANCE_AMOUNT = re.compile(
+    r"\b(?P<ones>[^\W\d_]{2,14})\s+(?P<unit>mil|mille)"
+    r"(?:\s+(?P<hundreds>[^\W\d_]{4,14}))?\s+"
+    r"(?P<cur>euros?|d[oó]lares?|libras?|livres?|reais)\b",
+    re.IGNORECASE,
+)
+_GERMAN_STEM = {
+    "zehn": 10, "elf": 11, "zwölf": 12, "zwoelf": 12,
+    "zwanzig": 20, "dreißig": 30, "dreissig": 30, "vierzig": 40,
+    "fünfzig": 50, "fuenfzig": 50, "sechzig": 60, "siebzig": 70,
+    "achtzig": 80, "neunzig": 90,
+}
+_GERMAN_AMOUNT = re.compile(
+    r"\b(?P<stem>zwanzig|dreißig|dreissig|vierzig|fünfzig|fuenfzig|sechzig|siebzig|achtzig|neunzig|zehn|elf|zwölf|zwoelf)tausend\s+(?P<cur>euro[s]?)\b",
+    re.IGNORECASE,
+)
 _CORRECTION = re.compile(
     r"\bcorrect\b[^.\n]{0,80}?\bis\b[^.\n]{0,30}?(?P<amt>[$€£]\s?\d[\d,]*(?:\.\d+)?)",
     re.IGNORECASE,
@@ -101,6 +144,20 @@ def parse_number(raw: str) -> float:
     else:
         compact = compact.replace(",", "")
     return float(compact)
+
+
+def _written_symbol(token: str) -> str | None:
+    """The currency the sender wrote. Missing currency is not dollars."""
+    key = (token or "").casefold().replace("ó", "o").replace("á", "a")
+    if key.startswith("euro"):
+        return "€"
+    if key.startswith("libr") or key.startswith("livre") or key in {"quid", "pound", "pounds", "gbp"}:
+        return "£"
+    if key.startswith("rea"):
+        return "R$"
+    if key.startswith("dolar") or key.startswith("dollar") or key in {"usd", "bucks"}:
+        return "$"
+    return _symbol(token) if token else None
 
 
 def _symbol(token: str) -> str:
@@ -188,6 +245,20 @@ def extract_budget(text: str) -> str | None:
         if not words.group("cur") and re.search(r"\beuros?\b", text[words.end() : words.end() + 24], re.I):
             symbol = "€"
         return _fmt(symbol, spoken)
+    romance = _ROMANCE_AMOUNT.search(text)
+    if romance:
+        ones = _ROMANCE_ONES.get(romance.group("ones").casefold())
+        symbol = _written_symbol(romance.group("cur"))
+        hundreds = _ROMANCE_HUNDREDS.get((romance.group("hundreds") or "").casefold(), 0)
+        if romance.group("hundreds") and romance.group("hundreds").casefold() not in _ROMANCE_HUNDREDS:
+            ones = None
+        if ones is not None and symbol is not None:
+            return _fmt(symbol, ones * 1000 + hundreds)
+    german = _GERMAN_AMOUNT.search(text)
+    if german:
+        stem = _GERMAN_STEM.get(german.group("stem").casefold())
+        if stem is not None:
+            return _fmt("€", stem * 1000)
     thousand_range = _THOUSAND_RANGE.search(text)
     if thousand_range:
         symbol = "€" if re.search(r"\beuros?\b", text, re.I) else "$"
