@@ -44,7 +44,7 @@ export function DeskLogin({ onDone }: { onDone: () => void }) {
           <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Inbox className="size-5" strokeWidth={1.75} />
           </span>
-          <span className="text-sm font-semibold">Lane</span>
+          <span className="text-sm font-semibold">Relay</span>
         </span>
         <DemoBadge stats={null} onOpenKey={() => setKeyOpen(true)} />
       </header>

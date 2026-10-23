@@ -1,4 +1,4 @@
-# Lane dashboard
+# Relay dashboard
 
 Next.js desk for AI Inbox Triage to CRM. The API lives in the repo root.
 

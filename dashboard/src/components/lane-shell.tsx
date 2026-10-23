@@ -55,7 +55,7 @@ export function LaneShell({ children }: { children: ReactNode }) {
   const lastRun = desk.worker?.last_run?.finished_at;
 
   useEffect(() => {
-    document.title = title === "Inbox" ? "Lane" : `${title} · Lane`;
+    document.title = title === "Inbox" ? "Relay" : `${title} · Relay`;
   }, [title]);
 
   useEffect(() => {
@@ -123,7 +123,7 @@ export function LaneShell({ children }: { children: ReactNode }) {
       <Sheet open={navOpen} onOpenChange={(open) => setNavPath(open ? pathname : null)}>
         <SheetContent side="left" aria-label="Navigation">
           <SheetHeader>
-            <SheetTitle>Lane</SheetTitle>
+            <SheetTitle>Relay</SheetTitle>
           </SheetHeader>
           <nav className="flex flex-col gap-1 p-2" aria-label="Pages">
             {LINKS.map((link) => (
@@ -146,7 +146,7 @@ function Sidebar({ stats, pathname }: { stats: Stats | null; pathname: string })
         <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
           <Inbox className="size-5" strokeWidth={1.75} />
         </span>
-        <span className="hidden text-sm font-semibold lg:inline">Lane</span>
+        <span className="hidden text-sm font-semibold lg:inline">Relay</span>
       </div>
       <nav className="flex flex-1 flex-col gap-0.5 px-2" aria-label="Pages">
         {LINKS.map((link) => (

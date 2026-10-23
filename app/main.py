@@ -76,7 +76,7 @@ async def lifespan(_app: FastAPI):
         stop_worker()
 
 
-app = FastAPI(title="Lane inbox triage", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Relay inbox triage", version="1.0.0", lifespan=lifespan)
 
 
 def _origins() -> list[str]:

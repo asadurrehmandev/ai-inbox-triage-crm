@@ -269,8 +269,8 @@ def test_crm_payloads_match_hubspot_and_gohighlevel():
     assert hubspot["lifecyclestage"] == "lead"
     highlevel = highlevel_payload(lead)
     assert highlevel["companyName"] == "Acme Robotics"
-    assert highlevel["source"] == "Lane inbox triage"
-    assert "lane" in highlevel["tags"]
+    assert highlevel["source"] == "Relay inbox triage"
+    assert "relay" in highlevel["tags"]
 
 
 def test_remote_crm_upserts_and_records_failures(client, monkeypatch):

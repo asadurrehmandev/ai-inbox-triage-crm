@@ -37,8 +37,8 @@ def highlevel_payload(lead: dict) -> dict:
         "lastName": last,
         "name": lead.get("name") or "",
         "companyName": lead.get("company") or "",
-        "source": "Lane inbox triage",
-        "tags": ["lane", lead.get("category") or "lead"],
+        "source": "Relay inbox triage",
+        "tags": ["relay", lead.get("category") or "lead"],
     }
 
 
@@ -56,8 +56,8 @@ def _post_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
 
 
 _HUBSPOT_PROPS = (
-    ("lane_budget", "Lane budget"),
-    ("lane_intent", "Lane intent"),
+    ("lane_budget", "Relay budget"),
+    ("lane_intent", "Relay intent"),
 )
 
 
@@ -77,7 +77,7 @@ def _ensure_hubspot_properties(token: str) -> None:
                 "type": "string",
                 "fieldType": "text",
                 "groupName": "contactinformation",
-                "description": "Written by Lane inbox triage.",
+                "description": "Written by Relay inbox triage.",
             },
             timeout=20,
         )
@@ -101,7 +101,7 @@ def _hubspot_contact_id(token: str, email: str) -> str:
 
 def _hubspot_note(token: str, email: str, lead: dict) -> None:
     """Write budget and intent on a note associated to the contact, not a floating note."""
-    note = f"Lane budget: {lead.get('budget') or 'none'}. Lane intent: {lead.get('intent') or 'none'}."
+    note = f"Relay budget: {lead.get('budget') or 'none'}. Relay intent: {lead.get('intent') or 'none'}."
     contact_id = _hubspot_contact_id(token, email)
     associations = []
     if contact_id:
@@ -185,8 +185,8 @@ def _push_highlevel(lead: dict) -> bool:
         if exc.response.status_code != 400:
             raise
     payload.pop("customFields", None)
-    note = f"Lane budget: {lead.get('budget') or 'none'}. Lane intent: {lead.get('intent') or 'none'}."
-    payload["source"] = f"Lane inbox triage. {note}"
+    note = f"Relay budget: {lead.get('budget') or 'none'}. Relay intent: {lead.get('intent') or 'none'}."
+    payload["source"] = f"Relay inbox triage. {note}"
     _post_retry(
         "https://services.leadconnectorhq.com/contacts/upsert",
         headers={

@@ -14,9 +14,12 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lane",
+  title: {
+    default: "Relay",
+    template: "%s · Relay",
+  },
   description:
-    "Runs out of the box in Demo mode with sample responses. Paste your own Anthropic or OpenAI key, never stored, to test the live AI. A person approves every lead before it reaches the CRM.",
+    "Support inbox triage into a CRM queue with phishing guardrails. Runs in Demo mode with sample responses, or paste your own Anthropic or OpenAI key (never stored) for live AI.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
