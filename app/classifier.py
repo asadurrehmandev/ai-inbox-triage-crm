@@ -377,6 +377,46 @@ def _operational_deadline(text: str) -> bool:
     return bool(_same_day_deadline(text) or _OPERATIONAL_WHEN.search(text or ""))
 
 
+# Function words, not outage phrases. They only choose which notes trust the head.
+_PT_FUNCTION = re.compile(
+    r"\b(?:n[aã]o|nao|ning[uú]em|ninguem|nenhum[a]?|voc[eê]s?|voce|tamb[eé]m|tambem|"
+    r"obrigad[oa]|manh[aã]|ficou|nest[ea]|ness[ea]|consigo|equipe|hoje)\b|[ãõ]",
+    re.IGNORECASE,
+)
+_UR_FUNCTION = re.compile(
+    r"\b(?:hai|hain|nahi|nahin|gaya|gayi|gaye|mein|chahiye|warna|koi|yeh|woh|"
+    r"humein|pehle|raha|rahi|rahe|hoon|hoti|jati|leta|kis|kahan|aur)\b",
+    re.IGNORECASE,
+)
+_EN_FUNCTION = re.compile(
+    r"\b(?:the|is|are|was|were|please|could|would|with|from|this|that|not|my|our|how|we|you)\b",
+    re.IGNORECASE,
+)
+
+
+def _urgency_head_decides(text: str) -> bool:
+    """Portuguese, Arabic, Chinese, or romanized Urdu.
+
+    The outage list is mostly English. On these notes the whole-note head is
+    the decision. A phrase may still raise urgency. It does not have to match.
+    """
+    sample = text or ""
+    if len(re.findall(r"[\u0600-\u06FF]", sample)) >= 12:
+        return True
+    hanzi = len(re.findall(r"[\u4e00-\u9fff]", sample))
+    kana = len(re.findall(r"[\u3040-\u30ff]", sample))
+    if hanzi >= 8 and kana == 0:
+        return True
+    portuguese = {match.group(0).casefold() for match in _PT_FUNCTION.finditer(sample)}
+    urdu = {match.group(0).casefold() for match in _UR_FUNCTION.finditer(sample)}
+    english = _EN_FUNCTION.findall(sample)
+    if len(portuguese) >= 2 and len(portuguese) >= len(english):
+        return True
+    if len(urdu) >= 2 and len(urdu) > len(english):
+        return True
+    return False
+
+
 def _identity_tokens(email: dict | None) -> list[str]:
     """Sender-name tokens, and a product token that only hides an urgency stem."""
     if not email:
@@ -438,6 +478,29 @@ def message_urgent(full_text: str, body: str, email: dict | None = None) -> floa
     if not tokens:
         return raw
     scrubbed = _span_urgent(_scrub_tokens(full_text, tokens), _scrub_tokens(body, tokens))
+    if raw >= urgency_threshold() and scrubbed < urgency_threshold():
+        return scrubbed
+    return raw
+
+
+def full_note_urgent(full_text: str, email: dict | None = None) -> float:
+    """Urgency of the whole note, with the same negation and name scrub as the span score.
+
+    One hot sentence inside a calm note does not raise this. A phrase list can
+    still raise that sentence. It cannot clear a whole-note hit.
+    """
+
+    def _take(text: str) -> float:
+        verdict = assess(text or "")
+        if (verdict.get("negated") or 0) >= negation_threshold():
+            return 0.0
+        return float(verdict.get("urgent") or 0)
+
+    raw = _take(full_text or "")
+    tokens = _identity_tokens(email)
+    if not tokens:
+        return raw
+    scrubbed = _take(_scrub_tokens(full_text or "", tokens))
     if raw >= urgency_threshold() and scrubbed < urgency_threshold():
         return scrubbed
     return raw
@@ -581,13 +644,19 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
     # The embedding head fills a gap. A clear rule score is left alone.
     guessed = None
     signals = signals or {}
-    # Urgency is the learned head. It does not override a calm support note
-    # unless the note claims an outage or names an operational deadline.
-    # A long body can raise the head on one sentence. That does not count
-    # without the claim or the deadline. A same-day legal deadline still counts
-    # when the wording is not an outage. A picture or a calendar is not one.
-    # The subject alone must not carry the urgent score.
+    # The head runs on every note. Phrase lists only raise. On Portuguese,
+    # Arabic, Chinese, and romanized Urdu, a whole-note score at or above the
+    # threshold stays urgent even when no outage phrase matches. English still
+    # needs that phrase or a deadline, so a calm support note stays support.
+    # One hot sentence in a long calm body does not count unless a phrase
+    # raises it. A picture or a calendar is not urgent.
     negated = signals.get("negated", 0) >= negation_threshold()
+    full_hit = float(signals.get("urgent_full", 0) or 0) >= urgency_threshold()
+    span_hit = float(signals.get("urgent", 0) or 0) >= urgency_threshold()
+    phrase_raises = _same_day_deadline(lowered) or (
+        span_hit and (_outage_claim(lowered) or _operational_deadline(lowered))
+    )
+    decisive = full_hit and _urgency_head_decides(lowered)
     if negated:
         scores["urgent"] = 0
         note("the sender says it is not urgent")
@@ -596,13 +665,7 @@ def _score(text: str, email: dict, signals: dict | None = None) -> tuple[dict[st
         and not _NEWSLETTER.search(lowered)
         and scores["spam"] < 5
         and scores["recruiter"] < 4
-        and (
-            _same_day_deadline(lowered)
-            or (
-                signals.get("urgent", 0) >= urgency_threshold()
-                and (_outage_claim(lowered) or _operational_deadline(lowered))
-            )
-        )
+        and (decisive or phrase_raises)
     ):
         scores["urgent"] = max(scores["urgent"], 6.0)
         note("customer impact, a security incident, or a same-day deadline")
@@ -1273,7 +1336,9 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
     text = strip_quotes(strip_injection_notes(full))
     body_for_urgent = strip_quotes(strip_injection_notes(html_to_text(raw)))
     signals = dict(assess(text))
-    # The head is the urgency signal. A long signature must not bury the one line that matters.
+    # Whole-note score first. Sentence-max can raise a buried outage line.
+    # It cannot clear a whole-note hit, and it cannot invent one on its own.
+    signals["urgent_full"] = full_note_urgent(text, prepared)
     signals["urgent"] = message_urgent(text, body_for_urgent, prepared)
     if signals["urgent"] > 0:
         # A negated full-text pool must not cancel a sentence the negation head accepts.

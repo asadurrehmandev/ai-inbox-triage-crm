@@ -133,6 +133,21 @@ _PREFIX = re.compile(rf"(?P<cur>{_CUR})\s?(?P<num>{_NUM})(?!\s*k\b)", re.IGNOREC
 _SUFFIX = re.compile(rf"(?P<num>{_NUM})\s?(?P<cur>USD|EUR|GBP|€|£|\$)", re.IGNORECASE)
 _SYMBOL_K = re.compile(rf"(?P<cur>\$|€|£)\s?(?P<num>\d+(?:\.\d+)?)\s*k\b", re.IGNORECASE)
 _BARE_K = re.compile(r"(?<![A-Za-z$€£])(?P<num>\d+(?:\.\d+)?)\s*k(?:-ish)?\b", re.IGNORECASE)
+_QUANTITY_WORD = {
+    "subscribers", "customers", "users", "orders", "days", "hours", "pages",
+    "seats", "items", "copies", "people", "followers", "months", "years",
+    "weeks", "minutes", "times", "files", "records", "rows", "tickets",
+    "guests", "visitors", "percent", "percentage",
+}
+_MONEY_CONTEXT = re.compile(
+    r"\b(?:budget|quote|quotation|spend|price|priced|pricing|cost|"
+    r"presupuesto|devis|or[cç]amento|orcamento|kosten|preis|precio|prix)\b",
+    re.IGNORECASE,
+)
+_ADJACENT_CURRENCY = re.compile(
+    rf"(?:(?P<cur1>[^\W\d_]{{3,24}})\s+(?P<num1>{_NUM})|(?P<num2>{_NUM})\s+(?P<cur2>[^\W\d_]{{3,24}}))",
+    re.IGNORECASE,
+)
 
 
 def parse_number(raw: str) -> float:
@@ -243,6 +258,41 @@ def _without_withdrawn(text: str) -> str:
 
 def _range(symbol: str, left: float, right: float) -> str:
     return f"{_fmt(symbol, left)}–{_fmt(symbol, right)}"
+
+
+def _sentence_span(text: str, start: int, end: int) -> str:
+    cuts = [text.rfind(mark, 0, start) for mark in (".", "!", "?", "\n")]
+    sentence_start = max(cuts) + 1
+    tail = text[end:]
+    stops = [tail.find(mark) for mark in (".", "!", "?", "\n") if tail.find(mark) != -1]
+    sentence_end = end + (min(stops) if stops else len(tail))
+    return text[sentence_start:sentence_end]
+
+
+def _adjacent_unlisted_currency(text: str) -> str | None:
+    """A digit amount beside a currency word. Unknown words stay written.
+
+    A quantity such as customers or hours is not a currency. The amount has to
+    share a sentence with a budget, quote, or price word.
+    """
+    for match in _ADJACENT_CURRENCY.finditer(text or ""):
+        raw_cur = (match.group("cur1") or match.group("cur2") or "").strip(".,;:")
+        raw_num = match.group("num1") or match.group("num2")
+        key = raw_cur.casefold()
+        if not raw_num or key in _NOT_CURRENCY or key in _QUANTITY_WORD:
+            continue
+        if not _MONEY_CONTEXT.search(_sentence_span(text, match.start(), match.end())):
+            continue
+        amount = parse_number(raw_num)
+        symbol = _written_symbol(raw_cur)
+        if symbol is None:
+            if abs(amount - round(amount)) < 0.001:
+                shown = f"{int(round(amount)):,}"
+            else:
+                shown = f"{amount:,.2f}"
+            return f"{key} {shown}"
+        return _fmt(symbol, amount)
+    return None
 
 
 def extract_budget(text: str) -> str | None:
@@ -370,6 +420,9 @@ def extract_budget(text: str) -> str | None:
         if "£" in clause or re.search(r"\bgbp\b", clause, re.I):
             symbol = "£"
         return _fmt(symbol, float(bare.group("num")) * 1000)
+    written = _adjacent_unlisted_currency(text)
+    if written:
+        return written
     return None
 
 

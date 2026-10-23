@@ -31,7 +31,11 @@ from app.budget import extract_budget
         ("two hundred thousand dollars", "$200,000"),
         ("Please ignore the $62,000 figure. Correct figure is $6,200.", "$6,200"),
         ("Our budget for the build is $5,500, not $55,000.", "$5,500"),
+        ("The project budget is 4800 kronor.", "kronor 4,800"),
+        ("The project budget is kronor 9300.", "kronor 9,300"),
+        ("The project budget is 1500 francs.", "francs 1,500"),
         ("We have 10k subscribers and 2,500 customers. Budget TBD.", None),
+        ("We counted 2500 customers in the old drawer. Budget TBD.", None),
         ("Could you send a quote? We have 10k followers. Budget TBD.", None),
     ],
 )
