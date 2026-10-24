@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 
 from app.budget import extract_budget
 from app.heads import assess, negation_threshold, urgency_threshold
@@ -1080,19 +1082,113 @@ def _body_sentences(body: str) -> list[str]:
     return [part.strip(" -") for part in re.split(r"(?<=[.!?])\s+", blob) if part.strip()]
 
 
+def _company_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").casefold())
+
+
+@lru_cache(maxsize=1)
+def _english_words() -> frozenset[str]:
+    path = Path("/usr/share/dict/words")
+    if not path.exists():
+        return frozenset()
+    return frozenset(
+        word.strip().lower()
+        for word in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if word.isalpha()
+    )
+
+
+def _domain_registrable_label(email: dict) -> str | None:
+    address = email.get("from_email") or ""
+    if "@" not in address or free_mail(address):
+        return None
+    label = address.split("@", 1)[1].split(".")[0]
+    if len(label) < 4:
+        return None
+    return label
+
+
+def _format_domain_company(label: str) -> str:
+    """Do not invent CamelCase on a compound domain label."""
+    if re.fullmatch(r"[A-Za-z]+", label) and label.lower() in _english_words():
+        return label.capitalize()
+    return label
+
+
+def _company_from_display_when_domain_differs(email: dict) -> str | None:
+    """A display name that names an org, when the domain label is a different token."""
+    sender = (email.get("from_name") or "").strip()
+    if not sender or _GREETING.match(sender):
+        return None
+    cleaned = _tidy_company(sender)
+    if not _company_line(cleaned):
+        return None
+    label = _domain_registrable_label(email)
+    if not label:
+        return None
+    display_key = _company_key(cleaned)
+    label_key = _company_key(label)
+    if display_key == label_key:
+        if re.search(r"\s", cleaned):
+            return cleaned
+        return None
+    if is_person(cleaned) and not _LEGAL_SUFFIX.search(cleaned):
+        return None
+    return cleaned
+
+
 def _company_from_domain(email: dict) -> str | None:
     """Use the sender's domain only when a person signed the note and no org line did."""
     body = email.get("body") or ""
     if not any(_CLOSINGS.match(line.strip()) for line in body.splitlines()):
         return None
-    address = email.get("from_email") or ""
-    if "@" not in address or free_mail(address):
+    label = _domain_registrable_label(email)
+    if not label:
         return None
-    label = address.split("@", 1)[1].split(".")[0]
-    letters = re.sub(r"[^A-Za-z]", "", label)
-    if len(letters) < 4:
-        return None
-    return letters[:1].upper() + letters[1:]
+    return _format_domain_company(label)
+
+
+_SUSPICIOUS_PHRASES: dict[str, str] = {
+    "payment_change": "asks to change bank details",
+    "lookalike_domain": "sender domain looks like a known contact",
+    "brand_impersonation": "brand name does not match the sender",
+    "display_name_mismatch": "display name does not match the domain",
+    "credential_request": "asks for credentials on the wrong site",
+    "deceptive_link": "payment link on the wrong domain",
+    "payment_lure": "asks to pay through a risky channel",
+    "payment_request": "asks to move money",
+    "gift_card": "asks for gift cards or crypto",
+    "owner_impersonation": "impersonates the account owner",
+    "dangerous_attachment": "dangerous attachment type",
+    "risk_score": "shows phishing structure with a payment or credential ask",
+    "prompt_injection": "contains hidden instructions",
+    "concealed_instruction": "contains concealed instructions",
+    "obfuscated_text": "uses concealed text",
+    "mismatched_link": "links do not match the sender",
+    "instruction_suppression": "tries to suppress alerts",
+}
+
+
+def _suspicious_detail(flags: list[str] | None) -> str:
+    """One readable reason. Technical flag names are not shown."""
+    ordered = hard_flags(list(flags or [])) or list(flags or [])
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for flag in ordered:
+        if flag == "suspicious":
+            continue
+        phrase = _SUSPICIOUS_PHRASES.get(flag)
+        if not phrase or phrase in seen:
+            continue
+        seen.add(phrase)
+        phrases.append(phrase)
+    if len(phrases) > 1:
+        phrases = [item for item in phrases if not item.startswith("shows phishing structure")]
+    if len(phrases) == 1:
+        return phrases[0]
+    if phrases:
+        return ", ".join(phrases[:3])
+    return ""
 
 
 def _intent_score(sentence: str) -> int:
@@ -1182,8 +1278,10 @@ def draft_reply(
     reasons: list[str] | None = None,
 ) -> str:
     if category == "suspicious":
-        listed = ", ".join(flags or ["suspicious"])
-        return f"No reply. Flagged as suspicious: {listed}."
+        detail = _suspicious_detail(flags)
+        if not detail:
+            return "No reply. Flagged as suspicious."
+        return f"No reply. Flagged as suspicious: {detail}."
     if category == "spam":
         return "No reply. This was filed as spam and will not be answered."
     if category == "recruiter":
@@ -1387,6 +1485,8 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
         name = extract_name(visible, known_contacts, accept_display=category not in {"spam", "suspicious"})
         company = extract_company(visible, known_contacts)
         if company is None and category not in {"spam", "suspicious"}:
+            company = _company_from_display_when_domain_differs(visible)
+        if company is None and category not in {"spam", "suspicious"}:
             company = _company_from_domain(visible)
         auto = (prepared.get("auto_submitted") or "").lower()
         if _OOO.search(prepared.get("subject") or "") or _OOO.search(text) or (auto and auto != "no"):
@@ -1446,7 +1546,14 @@ def classify_rules(email: dict, known_contacts: list[dict] | None = None, domain
         company=company,
         budget=budget,
         intent=intent,
-        draft_reply=draft_reply(category, name, intent, suggested=suggested, reasons=reasons),
+        draft_reply=draft_reply(
+            category,
+            name,
+            intent,
+            flags=blocking if suspicious else None,
+            suggested=suggested,
+            reasons=reasons,
+        ),
         model="rules",
         risk_flags=flags,
         secondary_categories=secondary,

@@ -105,6 +105,48 @@ def test_phishing_that_says_invoice_is_suspicious():
     assert result.category == "suspicious"
     assert result.budget is None
     assert result.draft_reply.startswith("No reply")
+    assert "suspicious: suspicious" not in result.draft_reply.casefold()
+
+
+def test_suspicious_draft_uses_the_reason_that_fired():
+    result = classify_rules(
+        {
+            "from_name": "Accounts",
+            "from_email": "ap@brightline.example",
+            "subject": "Bank change",
+            "body": (
+                "Please note our remittance details have been updated. Kindly direct all future "
+                "payments to the account below. The old account is no longer in use.\n"
+            ),
+        }
+    )
+    assert result.category == "suspicious"
+    assert "payment_change" in result.risk_flags
+    assert result.draft_reply == "No reply. Flagged as suspicious: asks to change bank details."
+
+
+def test_display_company_beats_a_mashed_domain_label():
+    result = classify_rules(
+        {
+            "from_name": "Harborline Freight",
+            "from_email": "nina@harborlinefreight.com",
+            "subject": "Rates",
+            "body": "Hi,\n\nNeed a quote.\n\nThanks,\nNina Patel\n",
+        }
+    )
+    assert result.company == "Harborline Freight"
+
+
+def test_domain_company_does_not_invent_spacing_on_a_compound_label():
+    result = classify_rules(
+        {
+            "from_name": "Nina Patel",
+            "from_email": "nina@harborlinefreight.com",
+            "subject": "Rates",
+            "body": "Hi,\n\nNeed a quote.\n\nThanks,\nNina Patel\n",
+        }
+    )
+    assert result.company == "harborlinefreight"
 
 
 def test_past_due_invoice_marked_urgent_stays_an_invoice():
